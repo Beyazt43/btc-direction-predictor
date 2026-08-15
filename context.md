@@ -1,7 +1,7 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **design phase complete through evaluation methodology.** Feature engineering onward still open.
+> Status: **scaffold is complete, tooling is configured, and the next step is docker-compose.yml + config.py**
 
 ---
 

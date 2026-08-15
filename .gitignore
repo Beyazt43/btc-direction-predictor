@@ -1,0 +1,35 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Env & secrets
+.env
+.env.local
+*.pem
+
+# Data & models — never commit these
+data/
+*.csv
+*.parquet
+models/*.pkl
+models/*.joblib
+models/*.json
+mlruns/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Docker/Postgres local volumes
+pgdata/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
+EOF

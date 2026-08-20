@@ -39,6 +39,12 @@ dev = [
     "ruff>=0.16.3",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Explicit so async test behaviour does not shift with a pytest-asyncio upgrade.
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

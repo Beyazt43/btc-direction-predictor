@@ -12,12 +12,23 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build: .
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: "no"
+
   api:
     build: .
     env_file: .env
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     command: uvicorn btcpred.api.main:app --host 0.0.0.0 --port 8000
@@ -28,6 +39,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: python -m btcpred.scheduler
 
 volumes:

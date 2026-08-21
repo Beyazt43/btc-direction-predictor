@@ -1,7 +1,11 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **scaffold is complete, tooling is configured, and the next step is docker-compose.yml + config.py**
+> Status: **infrastructure and ingestion are live; the next step is feature engineering (§9 item 1).**
+> Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for both tables,
+> Binance ingestion (idempotent, self-healing, closed-candles-only), and the APScheduler poll loop.
+> Not yet built: the `api` service (compose points at a `btcpred.api.main:app` that does not exist),
+> features, models, retraining, drift detection, dashboard.
 
 ---
 
@@ -51,6 +55,14 @@ Pull **1-hour klines directly.** Do not pull 1-minute and resample. (Sub-hour da
 ### Ingestion is idempotent
 
 `UNIQUE (symbol, open_time)` + `ON CONFLICT DO NOTHING` (or `DO UPDATE` to allow late candle corrections). Scheduler double-fires and backfills are safe.
+
+### Poll cadence erodes the prediction horizon — **OPEN, revisit with the prediction layer**
+
+The cadence above has a consequence that only bites once predictions are being generated. Bar `t` closes at `:59:59.999`, but at a 10-minute poll it may not be *detected* for another 10 minutes. The prediction for `t+1` is therefore logged up to a sixth of the way into the very hour it predicts.
+
+This is **not leakage** — no data from `t+1` is used. But "next-hour predictor" then means, in practice, the remaining ~50 minutes, which is the kind of detail a careful reader will catch in the writeup.
+
+Tightening `INGEST_INTERVAL_MINUTES` to 1–2 closes the gap for almost nothing: `/api/v3/klines` costs weight 2 per request against a generous limit. Decide this when the prediction job is built, not before — it only matters once something is being predicted.
 
 ---
 
@@ -138,6 +150,24 @@ def build_feature_row(as_of_time): ...
 - Writeup framing: *"single source of truth for feature construction, shared between training and serving, to eliminate train/serve skew and lookahead bias."*
 
 **Known trap to guard against:** careless pandas `.rolling()` / `.shift()`. A `shift(-1)` instead of `shift(1)` invalidates an entire backtest. Also: never let any feature touch `high(t+1)` or `low(t+1)` — leaks future info even if `close` handling is correct.
+
+### Downtime and back-generated predictions — **RESOLVED: no schema change needed**
+
+The system will not always be running (see §10). Missed hours therefore need a defensible story, and the existing schema already provides one.
+
+The outcome of hour `T` becomes knowable at `T + 1h`, once `close(T)` is final. So:
+
+```
+honest live prediction  ⟺  predicted_at < target_open_time + interval
+```
+
+Anything logged later was written when the answer was already visible. This is exactly why §4 stores `predicted_at` separately from `target_open_time` — **no extra column and no migration are required** to tell the two apart.
+
+**Consequences for the build:**
+
+- Encode the rule once, as a shared helper or SQL view. Re-deriving the comparison ad hoc in each dashboard query is how the definitions drift apart.
+- Report live and backfilled accuracy as **separate lines**, never pooled. An honest gap in the live record is more credible than a suspiciously unbroken one.
+- A missed prediction may only be back-generated using **the model version that was live at that hour**. Reconstructing it with a later retrain leaks future data into a past prediction — the model has by then seen data from after `target_open_time`. This constrains the retraining job (§9 item 3): model versions and their validity windows must be recoverable, or back-generation is off the table entirely.
 
 ---
 
@@ -244,9 +274,14 @@ Work through these in order, same step-by-step mode:
 
 1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that SARIMAX doesn't.
 2. **Model layer implementation detail** — SARIMAX order selection & refit cadence; GBT hyperparameter space; how both get versioned.
-3. **Retraining job** — daily cadence; expanding vs. sliding window in production; what triggers an off-schedule retrain; model versioning & rollback.
+3. **Retraining job** — daily cadence; expanding vs. sliding window in production; what triggers an off-schedule retrain; model versioning & rollback. **Carries a constraint from §5:** model versions and their validity windows must stay recoverable, or missed predictions can never be back-generated honestly.
 4. **Drift detection** — concrete thresholds using §8's CI numbers; what triggers an *alert* vs. a *retrain*; whether to also monitor feature drift (PSI / KS) in addition to performance drift.
-5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel.
+5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.
+
+**Two decisions deferred on purpose, to be settled when the prediction job is built** (both matter only once something is being predicted):
+
+- **Poll cadence** (§3) — tighten `INGEST_INTERVAL_MINUTES` so predictions are not logged a sixth of the way into the hour they predict.
+- **Always-on hosting** (§10) — a sleeping laptop stops being an acceptable host the moment prediction history starts accruing. Deferred because the resource profile (retrain duration, artifact size) is unknown until the model layer exists.
 
 ---
 

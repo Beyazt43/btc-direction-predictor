@@ -90,7 +90,7 @@ CREATE TABLE price_bars (
 ```sql
 CREATE TABLE predictions (
     id                  BIGSERIAL PRIMARY KEY,
-    model_name          TEXT NOT NULL,              -- 'sarimax' | 'xgboost'
+    model_name          TEXT NOT NULL,              -- 'sarima' | 'xgboost'
     model_version       TEXT NOT NULL,              -- hash or retrain timestamp
     target_open_time    TIMESTAMPTZ NOT NULL,       -- the hour being predicted
     predicted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -196,9 +196,14 @@ If a dead zone is wanted properly, use a **volatility-normalized** threshold (±
 
 ## 7. Model Layer
 
-### Baseline: SARIMAX
+### Baseline: SARIMA — univariate, **no exogenous regressors (DECIDED)**
+
+The baseline sees only its own log-return history. Rationale: it keeps the comparison legible — classical linear time-series structure against learned nonlinear structure over richer inputs — so any GBT edge is attributable to model family and inputs together, rather than to a partial overlap in what each model was fed.
+
+**This makes it SARIMA, not SARIMAX.** The `X` in SARIMAX *is* the exogenous regressor; with none, the name claims a capability the model never exercises. That is worth naming correctly rather than letting a reader assume otherwise. If order selection (§9 item 2) also settles on no seasonal terms, it is plain **ARIMA** and should be called that.
+
 - **Target: log-return** `ln(close(t+1)/close(t))` — **DECIDED.**
-  - Stationary(-ish), which matters for ARIMA/SARIMAX assumptions.
+  - Stationary(-ish), which matters for ARIMA-family assumptions.
   - Maps directly to direction (`> 0` → up) with no price-level reconstruction.
 - Directional call = forecast-then-threshold at 0.
 
@@ -206,10 +211,10 @@ If a dead zone is wanted properly, use a **volatility-normalized** threshold (±
 - **Classifies the binary label directly** (native discriminative training on the task).
 
 ### The asymmetry is intentional
-SARIMAX = forecast-then-threshold; GBT = classify directly. Do **not** artificially force both into the same paradigm. The asymmetry reflects *why* these two families are being compared: one is a classical statistical forecaster repurposed for a directional call, the other is trained natively on it. Narrate this.
+SARIMA = forecast-then-threshold; GBT = classify directly. Do **not** artificially force both into the same paradigm. The asymmetry reflects *why* these two families are being compared: one is a classical statistical forecaster repurposed for a directional call, the other is trained natively on it. Narrate this.
 
 ### Both emit comparable probabilities
-SARIMAX gives a forecast *distribution*, so `P(log-return > 0)` falls out of the forecast mean and standard error. This means both models can be compared on **log loss and AUC**, not just thresholded accuracy — a substantially richer head-to-head.
+SARIMA gives a forecast *distribution*, so `P(log-return > 0)` falls out of the forecast mean and standard error. This means both models can be compared on **log loss and AUC**, not just thresholded accuracy — a substantially richer head-to-head.
 
 ---
 
@@ -237,7 +242,7 @@ Otherwise you overfit to the validation scheme itself.
 | **Persistence baseline** | Predict same direction as previous hour |
 | **Random baseline** | Sanity floor |
 | **Matthews correlation coefficient (MCC)** | Robust to class imbalance; near-zero MCC at 52% accuracy is the honest tell that nothing is being learned |
-| **Log loss / AUC-ROC** | On probabilities; enables fair SARIMAX-vs-GBT comparison |
+| **Log loss / AUC-ROC** | On probabilities; enables fair SARIMA-vs-GBT comparison |
 
 If neither model beats "always up," **report that honestly** — it makes the project more credible, not less.
 
@@ -272,8 +277,8 @@ At true accuracy ≈ 0.50, SE = `√(0.25/n)`:
 
 Work through these in order, same step-by-step mode:
 
-1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that SARIMAX doesn't.
-2. **Model layer implementation detail** — SARIMAX order selection & refit cadence; GBT hyperparameter space; how both get versioned.
+1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that SARIMA doesn't.
+2. **Model layer implementation detail** — SARIMA order selection (and whether seasonal terms survive it at all, which decides SARIMA vs ARIMA) & refit cadence; GBT hyperparameter space; how both get versioned.
 3. **Retraining job** — daily cadence; expanding vs. sliding window in production; what triggers an off-schedule retrain; model versioning & rollback. **Carries a constraint from §5:** model versions and their validity windows must stay recoverable, or missed predictions can never be back-generated honestly.
 4. **Drift detection** — concrete thresholds using §8's CI numbers; what triggers an *alert* vs. a *retrain*; whether to also monitor feature drift (PSI / KS) in addition to performance drift.
 5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.

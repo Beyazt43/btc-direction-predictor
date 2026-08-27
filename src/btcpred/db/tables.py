@@ -6,6 +6,7 @@ two (`alembic check`) and catch drift between schema and code.
 """
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 metadata = sa.MetaData()
 
@@ -60,4 +61,45 @@ predictions = sa.Table(
         name="uq_predictions_model_version_target",
     ),
     sa.Index("ix_predictions_model_name_target_open_time", "model_name", "target_open_time"),
+    sa.ForeignKeyConstraint(
+        ["model_name", "model_version"],
+        ["model_versions.model_name", "model_versions.model_version"],
+        name="fk_predictions_model_version",
+    ),
+)
+
+
+model_versions = sa.Table(
+    "model_versions",
+    metadata,
+    sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column("model_name", sa.Text(), nullable=False),
+    sa.Column("model_version", sa.Text(), nullable=False),
+    sa.Column(
+        "trained_at",
+        sa.TIMESTAMP(timezone=True),
+        server_default=sa.text("now()"),
+        nullable=False,
+    ),
+    sa.Column("train_start", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("train_end", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("activated_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("retired_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("artifact_path", sa.Text(), nullable=False),
+    sa.Column("hyperparameters", postgresql.JSONB(), nullable=True),
+    sa.Column("feature_names", postgresql.JSONB(), nullable=True),
+    sa.Column("reference_metrics", postgresql.JSONB(), nullable=True),
+    sa.PrimaryKeyConstraint("id", name="pk_model_versions"),
+    sa.UniqueConstraint("model_name", "model_version", name="uq_model_versions_name_version"),
+    sa.CheckConstraint("train_end > train_start", name="ck_model_versions_train_window"),
+    sa.CheckConstraint(
+        "retired_at IS NULL OR activated_at IS NOT NULL",
+        name="ck_model_versions_retired_implies_activated",
+    ),
+    sa.Index(
+        "uq_model_versions_one_active_per_model",
+        "model_name",
+        unique=True,
+        postgresql_where=sa.text("activated_at IS NOT NULL AND retired_at IS NULL"),
+    ),
 )

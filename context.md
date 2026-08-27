@@ -90,7 +90,7 @@ CREATE TABLE price_bars (
 ```sql
 CREATE TABLE predictions (
     id                  BIGSERIAL PRIMARY KEY,
-    model_name          TEXT NOT NULL,              -- 'sarima' | 'xgboost'
+    model_name          TEXT NOT NULL,              -- 'arima' | 'xgboost'
     model_version       TEXT NOT NULL,              -- hash or retrain timestamp
     target_open_time    TIMESTAMPTZ NOT NULL,       -- the hour being predicted
     predicted_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -101,6 +101,37 @@ CREATE TABLE predictions (
     resolved_at         TIMESTAMPTZ,
     UNIQUE (model_name, model_version, target_open_time)
 );
+```
+
+```sql
+CREATE TABLE model_versions (
+    id                BIGSERIAL PRIMARY KEY,
+    model_name        TEXT NOT NULL,              -- 'arima' | 'xgboost'
+    model_version     TEXT NOT NULL,
+    trained_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    train_start       TIMESTAMPTZ NOT NULL,       -- reproducibility + leakage audit
+    train_end         TIMESTAMPTZ NOT NULL,
+    activated_at      TIMESTAMPTZ,                -- validity window (§5)
+    retired_at        TIMESTAMPTZ,
+    artifact_path     TEXT NOT NULL,
+    hyperparameters   JSONB,
+    feature_names     JSONB,                      -- train/serve skew detection
+    reference_metrics JSONB,                      -- §8 reference walk-forward metrics
+    UNIQUE (model_name, model_version),
+    CHECK (train_end > train_start),
+    CHECK (retired_at IS NULL OR activated_at IS NOT NULL)
+);
+
+-- At most one live version per model: a second active row makes "which version
+-- was live at hour T" ambiguous exactly when it matters.
+CREATE UNIQUE INDEX uq_model_versions_one_active_per_model ON model_versions (model_name)
+    WHERE activated_at IS NOT NULL AND retired_at IS NULL;
+
+-- Every logged prediction must name a registered version, or its validity
+-- window is unknown and §5's back-generation rule cannot be applied.
+ALTER TABLE predictions ADD CONSTRAINT fk_predictions_model_version
+    FOREIGN KEY (model_name, model_version)
+    REFERENCES model_versions (model_name, model_version);
 ```
 
 ### Schema design rationale (for the writeup)
@@ -196,25 +227,54 @@ If a dead zone is wanted properly, use a **volatility-normalized** threshold (±
 
 ## 7. Model Layer
 
-### Baseline: SARIMA — univariate, **no exogenous regressors (DECIDED)**
+### Baseline: ARIMA(1,0,0) — univariate, **no exogenous regressors, no seasonal terms (DECIDED)**
 
 The baseline sees only its own log-return history. Rationale: it keeps the comparison legible — classical linear time-series structure against learned nonlinear structure over richer inputs — so any GBT edge is attributable to model family and inputs together, rather than to a partial overlap in what each model was fed.
 
-**This makes it SARIMA, not SARIMAX.** The `X` in SARIMAX *is* the exogenous regressor; with none, the name claims a capability the model never exercises. That is worth naming correctly rather than letting a reader assume otherwise. If order selection (§9 item 2) also settles on no seasonal terms, it is plain **ARIMA** and should be called that.
+**The honest name is ARIMA — not SARIMAX, and not SARIMA.** The `X` is the exogenous regressor and there is none; the `S` is the seasonal component and order selection dropped that too (see below). Both letters would claim capabilities the model never exercises, which is exactly what an interviewer probes. `model_name` is therefore `'arima'`.
 
 - **Target: log-return** `ln(close(t+1)/close(t))` — **DECIDED.**
   - Stationary(-ish), which matters for ARIMA-family assumptions.
   - Maps directly to direction (`> 0` → up) with no price-level reconstruction.
 - Directional call = forecast-then-threshold at 0.
 
+### Order selection — **DECIDED: fixed ARIMA(1,0,0), coefficients refit each retrain**
+
+`d = 0`. The target is already log-*returns*, i.e. log-price differenced once. Differencing again over-differences and injects a spurious MA(1) coefficient near −0.5.
+
+The order is chosen **once**, on an early window, and only coefficients are refit thereafter. An order that churns between retrains makes versions incomparable: an accuracy change could be the market or could be the structure moving, with no way to tell which.
+
+No seasonal terms. Lag-24 return autocorrelation measured −0.0064, below the 0.0076 noise floor, and `s=24` would grow the statsmodels state space enough to turn each candidate fit from seconds into many minutes inside a daily retrain.
+
+### The baseline finds no structure — **and that is the result**
+
+AIC/BIC grid over `p,q ∈ 0..3` on the first 8,000 bars (holdout untouched):
+
+| order | AIC | BIC | ΔAIC |
+|---|---|---|---|
+| (0,0,3) | −61527.74 | −61492.81 | +0.00 |
+| (3,0,0) | −61527.74 | −61492.80 | +0.00 |
+| (1,0,0) | −61526.93 | −61505.97 | +0.82 |
+| **(0,0,0)** | −61521.78 | **−61507.81** | +5.96 |
+
+The whole 16-model spread is 12 AIC units and the top eight fall within 2.5 of each other — conventionally indistinguishable. **BIC selects white noise.**
+
+Out-of-sample directional accuracy over the following 2,000 bars (always-up = 49.95%, SE = 1.12pp): (0,0,3) 49.30%, (1,0,1) 48.80%, (2,0,2) 49.75%, (1,0,0) 50.10%, (0,0,0) 49.95%. The **AIC winner is the second-worst directional performer** — likelihood-based selection does not transfer to a directional call.
+
+**Why (1,0,0) and not (0,0,0):** ARIMA(0,0,0) has a positive fitted mean, so it predicts "up" 100% of the time — it *is* the majority-class baseline §8 already tracks separately, and adopting it would collapse the two-model comparison into one. (1,0,0) is the smallest non-degenerate choice: within 0.82 AIC of the best and 1.84 BIC of white noise, which is a tie under conventional reading.
+
+This is not a disappointing result to be buried. §1 commits to reporting near-random outcomes honestly, and "classical linear time-series modelling finds no exploitable structure in BTC hourly returns, and BIC says so explicitly" is a stronger writeup line than a tuned baseline that happens to land at 51%.
+
 ### Challenger: XGBoost / LightGBM
 - **Classifies the binary label directly** (native discriminative training on the task).
+- **Hyperparameter search — DECIDED:** focused random search, ~30 configs, shallow trees (`max_depth` 2–4, high `min_child_weight`, strong subsampling and regularisation). Sized to a target with R² ≈ 0.004, where the risk is fitting noise rather than underfitting. Cheap enough to rerun at every retrain instead of tuning once and pretending it still holds.
+- **No class weighting.** At a 50.36% base rate the imbalance is nil; `scale_pos_weight` would solve a problem that does not exist.
 
 ### The asymmetry is intentional
-SARIMA = forecast-then-threshold; GBT = classify directly. Do **not** artificially force both into the same paradigm. The asymmetry reflects *why* these two families are being compared: one is a classical statistical forecaster repurposed for a directional call, the other is trained natively on it. Narrate this.
+ARIMA = forecast-then-threshold; GBT = classify directly. Do **not** artificially force both into the same paradigm. The asymmetry reflects *why* these two families are being compared: one is a classical statistical forecaster repurposed for a directional call, the other is trained natively on it. Narrate this.
 
 ### Both emit comparable probabilities
-SARIMA gives a forecast *distribution*, so `P(log-return > 0)` falls out of the forecast mean and standard error. This means both models can be compared on **log loss and AUC**, not just thresholded accuracy — a substantially richer head-to-head.
+ARIMA gives a forecast *distribution*, so `P(log-return > 0)` falls out of the forecast mean and standard error. This means both models can be compared on **log loss and AUC**, not just thresholded accuracy — a substantially richer head-to-head.
 
 ---
 
@@ -242,7 +302,7 @@ Otherwise you overfit to the validation scheme itself.
 | **Persistence baseline** | Predict same direction as previous hour |
 | **Random baseline** | Sanity floor |
 | **Matthews correlation coefficient (MCC)** | Robust to class imbalance; near-zero MCC at 52% accuracy is the honest tell that nothing is being learned |
-| **Log loss / AUC-ROC** | On probabilities; enables fair SARIMA-vs-GBT comparison |
+| **Log loss / AUC-ROC** | On probabilities; enables fair ARIMA-vs-GBT comparison |
 
 If neither model beats "always up," **report that honestly** — it makes the project more credible, not less.
 
@@ -277,8 +337,8 @@ At true accuracy ≈ 0.50, SE = `√(0.25/n)`:
 
 Work through these in order, same step-by-step mode:
 
-1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that SARIMA doesn't.
-2. **Model layer implementation detail** — SARIMA order selection (and whether seasonal terms survive it at all, which decides SARIMA vs ARIMA) & refit cadence; GBT hyperparameter space; how both get versioned.
+1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that ARIMA doesn't.
+2. ~~**Model layer implementation detail**~~ — **RESOLVED, see §7.** Fixed ARIMA(1,0,0) with coefficients refit each retrain, no seasonal terms (so the honest name is **ARIMA**, not SARIMA or SARIMAX); focused ~30-config random search over shallow trees for the GBT; both versioned in the `model_versions` registry (§4) with explicit `activated_at`/`retired_at` validity windows and artifacts on a Docker named volume.
 3. **Retraining job** — daily cadence; expanding vs. sliding window in production; what triggers an off-schedule retrain; model versioning & rollback. **Carries a constraint from §5:** model versions and their validity windows must stay recoverable, or missed predictions can never be back-generated honestly.
 4. **Drift detection** — concrete thresholds using §8's CI numbers; what triggers an *alert* vs. a *retrain*; whether to also monitor feature drift (PSI / KS) in addition to performance drift.
 5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.

@@ -7,6 +7,7 @@ from btcpred.features.builder import (
     compute_features,
     load_bars,
 )
+from btcpred.features.dataset import build_dataset, build_training_dataset
 from btcpred.features.labels import LABEL_COLUMN, RETURN_COLUMN, add_labels
 
 __all__ = [
@@ -16,6 +17,8 @@ __all__ = [
     "WARMUP_BARS",
     "InsufficientHistoryError",
     "add_labels",
+    "build_dataset",
+    "build_training_dataset",
     "build_feature_row",
     "build_training_frame",
     "compute_features",

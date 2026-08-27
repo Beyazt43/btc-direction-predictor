@@ -32,6 +32,8 @@ services:
     ports:
       - "8000:8000"
     command: uvicorn btcpred.api.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - models:/app/models
 
   scheduler:
     build: .
@@ -42,6 +44,9 @@ services:
       migrate:
         condition: service_completed_successfully
     command: python -m btcpred.scheduler
+    volumes:
+      - models:/app/models
 
 volumes:
   pgdata:
+  models:

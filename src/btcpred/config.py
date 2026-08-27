@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,12 @@ class Settings(BaseSettings):
     # Scheduler
     ingest_interval_minutes: int = 10
     retrain_cron: str = "0 2 * * *"
+
+    # Models
+    # Trained artifacts live on a Docker named volume, with the path recorded in
+    # the model_versions registry.
+    model_dir: Path = Path("models")
+    holdout_days: int = 60
 
     # App
     log_level: str = "INFO"

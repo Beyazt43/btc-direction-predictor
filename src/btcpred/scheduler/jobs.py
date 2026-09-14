@@ -15,13 +15,20 @@ from btcpred.config import get_settings
 from btcpred.db.session import session_scope
 from btcpred.ingest.binance import interval_to_timedelta
 from btcpred.ingest.service import SyncResult, run_sync
+from btcpred.monitoring.drift import DriftCheck, check_model, record_check
 from btcpred.predict.repository import resolve_predictions
-from btcpred.predict.service import PredictionResult, clear_model_cache, generate_predictions
+from btcpred.predict.service import (
+    MODEL_NAMES,
+    PredictionResult,
+    clear_model_cache,
+    generate_predictions,
+)
 
 logger = logging.getLogger(__name__)
 
 TICK_JOB_ID = "lifecycle_tick"
 RETRAIN_JOB_ID = "daily_retrain"
+DRIFT_JOB_ID = "daily_drift_check"
 # Kept for callers that reference the ingest job by its original id.
 INGEST_JOB_ID = TICK_JOB_ID
 
@@ -150,3 +157,27 @@ async def retrain_job() -> int:
     # than serve a version that may just have been retired.
     clear_model_cache()
     return int(proc.returncode or 0)
+
+
+async def drift_job() -> list[DriftCheck]:
+    """Score each model's live 30-day window against its own live history.
+
+    Records a row per model whatever the outcome, so the dashboard shows a
+    continuous series rather than only the days something went wrong. An alert
+    is logged at WARNING with the top-moving features attached; nothing is
+    retrained in response, by decision (context.md §9 item 3).
+    """
+    settings = get_settings()
+    interval = interval_to_timedelta(settings.binance_interval)
+    checks: list[DriftCheck] = []
+    for name in MODEL_NAMES:
+        try:
+            async with session_scope() as session:
+                check = await check_model(
+                    session, name, symbol=settings.binance_symbol, interval=interval
+                )
+                await record_check(session, check)
+                checks.append(check)
+        except Exception:
+            logger.exception("drift check failed for %s; will retry tomorrow", name)
+    return checks

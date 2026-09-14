@@ -185,6 +185,10 @@ async def train_model(
     reference_metrics["selection_biased"] = model_name == "xgboost"
     reference_metrics["n_configs_searched"] = n_configs if model_name == "xgboost" else 0
     reference_metrics["holdout_included"] = include_holdout
+    # Decile edges of every feature over the training set. Drift monitoring
+    # bins live feature values against these to compute PSI, so the reference
+    # distribution travels with the version it belongs to.
+    reference_metrics["feature_quantiles"] = feature_quantiles(train)
 
     gate = gate_candidate(report, incumbent) if gated else GateDecision(True, "gate bypassed")
     reference_metrics["gate"] = {"activated": gate.activate, "reason": gate.reason}
@@ -247,6 +251,17 @@ async def train_all(
             seed=seed,
         )
     return results
+
+
+PSI_QUANTILES = [i / 10 for i in range(1, 10)]
+
+
+def feature_quantiles(frame: pd.DataFrame) -> dict[str, list[float]]:
+    """Interior decile edges per feature, defining ten equal-mass reference bins."""
+    return {
+        name: [float(v) for v in frame[name].astype(float).quantile(PSI_QUANTILES)]
+        for name in FEATURE_NAMES
+    }
 
 
 def holdout_bounds(settings: Settings) -> tuple[pd.Timestamp, pd.Timestamp]:

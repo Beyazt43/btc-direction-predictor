@@ -16,7 +16,14 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from btcpred.config import Settings, get_settings
 from btcpred.db.session import get_engine
-from btcpred.scheduler.jobs import RETRAIN_JOB_ID, TICK_JOB_ID, retrain_job, tick_job
+from btcpred.scheduler.jobs import (
+    DRIFT_JOB_ID,
+    RETRAIN_JOB_ID,
+    TICK_JOB_ID,
+    drift_job,
+    retrain_job,
+    tick_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,16 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         # letting a run land on top of the next scheduled one.
         misfire_grace_time=12 * 60 * 60,
     )
+
+    scheduler.add_job(
+        drift_job,
+        CronTrigger.from_crontab(settings.drift_cron, timezone=UTC),
+        id=DRIFT_JOB_ID,
+        name="daily drift check",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=12 * 60 * 60,
+    )
     return scheduler
 
 
@@ -76,11 +93,12 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     scheduler.start()
     logger.info(
-        "scheduler started: symbol=%s interval=%s poll=%dmin retrain='%s'",
+        "scheduler started: symbol=%s interval=%s poll=%dmin retrain='%s' drift='%s'",
         settings.binance_symbol,
         settings.binance_interval,
         settings.ingest_interval_minutes,
         settings.retrain_cron,
+        settings.drift_cron,
     )
 
     try:

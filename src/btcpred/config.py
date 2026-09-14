@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     # Scheduler
     ingest_interval_minutes: int = 2
     retrain_cron: str = "0 2 * * *"
+    # An hour after the retrain, so the check never races a version change.
+    drift_cron: str = "0 3 * * *"
 
     # Models
     # Trained artifacts live on a Docker named volume, with the path recorded in

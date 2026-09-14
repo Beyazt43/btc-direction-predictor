@@ -103,3 +103,34 @@ model_versions = sa.Table(
         postgresql_where=sa.text("activated_at IS NOT NULL AND retired_at IS NULL"),
     ),
 )
+
+drift_checks = sa.Table(
+    "drift_checks",
+    metadata,
+    sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column(
+        "checked_at",
+        sa.TIMESTAMP(timezone=True),
+        server_default=sa.text("now()"),
+        nullable=False,
+    ),
+    sa.Column("model_name", sa.Text(), nullable=False),
+    sa.Column("window_start", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("window_end", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("observed_n", sa.Integer(), nullable=False),
+    sa.Column("observed_accuracy", sa.Double(), nullable=True),
+    sa.Column("majority_baseline", sa.Double(), nullable=True),
+    sa.Column("reference_n", sa.Integer(), nullable=False),
+    sa.Column("reference_accuracy", sa.Double(), nullable=True),
+    sa.Column("z_score", sa.Double(), nullable=True),
+    sa.Column("status", sa.Text(), nullable=False),
+    sa.Column("reason", sa.Text(), nullable=True),
+    sa.Column("feature_psi", postgresql.JSONB(), nullable=True),
+    sa.PrimaryKeyConstraint("id", name="pk_drift_checks"),
+    sa.CheckConstraint(
+        "status IN ('ok', 'alert', 'warming_up', 'insufficient')",
+        name="ck_drift_checks_status",
+    ),
+    sa.CheckConstraint("window_end > window_start", name="ck_drift_checks_window"),
+    sa.Index("ix_drift_checks_model_checked_at", "model_name", sa.text("checked_at DESC")),
+)

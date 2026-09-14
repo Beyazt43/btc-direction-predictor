@@ -2,9 +2,18 @@ from btcpred.models.arima import ArimaDirectionModel
 from btcpred.models.base import DirectionModel
 from btcpred.models.gbt import GbtDirectionModel
 from btcpred.models.metrics import Evaluation, evaluate, mcnemar_test
-from btcpred.models.pipeline import TrainedModel, format_report, train_all, train_model
+from btcpred.models.pipeline import (
+    GateDecision,
+    TrainedModel,
+    format_report,
+    gate_candidate,
+    train_all,
+    train_model,
+)
 from btcpred.models.registry import (
+    activate_version,
     active_version,
+    list_versions,
     load_artifact,
     make_version_id,
     register_version,
@@ -25,14 +34,18 @@ __all__ = [
     "DirectionModel",
     "Evaluation",
     "Fold",
+    "GateDecision",
     "GbtDirectionModel",
     "TrainedModel",
     "WalkForwardReport",
+    "activate_version",
     "active_version",
     "build_folds",
     "evaluate",
     "evaluate_holdout",
     "format_report",
+    "gate_candidate",
+    "list_versions",
     "load_artifact",
     "make_version_id",
     "mcnemar_test",

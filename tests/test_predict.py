@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from btcpred.config import Settings
 from btcpred.features.builder import FEATURE_NAMES
 from btcpred.predict import service
 from btcpred.predict.repository import is_live
@@ -173,8 +174,13 @@ def test_is_live_compares_against_the_target_hour_close():
 
 
 @pytest.mark.asyncio
-async def test_tick_runs_all_three_stages_even_when_one_fails(monkeypatch):
-    """The order is ingest, resolve, predict, and a failure must not stop the rest."""
+async def test_tick_runs_all_three_stages_even_when_one_fails(monkeypatch, tmp_path):
+    """The order is ingest, resolve, predict, and a failure must not stop the rest.
+
+    The heartbeat must still be written at the end: a tick that survived a
+    failing stage is a live scheduler, and the healthcheck must see it as one.
+    """
+    heartbeat = tmp_path / "heartbeat"
     order: list[str] = []
 
     async def ok_ingest():
@@ -204,10 +210,18 @@ async def test_tick_runs_all_three_stages_even_when_one_fails(monkeypatch):
     monkeypatch.setattr(
         jobs,
         "get_settings",
-        lambda: type("S", (), {"binance_symbol": "BTCUSDT", "binance_interval": "1h"})(),
+        lambda: Settings(
+            _env_file=None,
+            postgres_user="u",
+            postgres_password="p",
+            postgres_db="d",
+            heartbeat_path=heartbeat,
+        ),
     )
 
+    assert not heartbeat.exists()
     result = await jobs.tick_job()
 
     assert order == ["ingest", "resolve", "predict"]
     assert result.resolved == 0
+    assert heartbeat.exists(), "a tick that completed must leave a heartbeat"

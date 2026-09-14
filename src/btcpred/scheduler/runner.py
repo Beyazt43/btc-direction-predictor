@@ -11,11 +11,12 @@ import signal
 from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from btcpred.config import Settings, get_settings
 from btcpred.db.session import get_engine
-from btcpred.scheduler.jobs import TICK_JOB_ID, tick_job
+from btcpred.scheduler.jobs import RETRAIN_JOB_ID, TICK_JOB_ID, retrain_job, tick_job
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,20 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         # Ingest immediately on boot instead of idling for a full interval.
         next_run_time=datetime.now(UTC),
     )
+
+    scheduler.add_job(
+        retrain_job,
+        CronTrigger.from_crontab(settings.retrain_cron, timezone=UTC),
+        id=RETRAIN_JOB_ID,
+        name="daily retrain",
+        max_instances=1,
+        coalesce=True,
+        # A retrain missed because the box was down at 02:00 should run when
+        # it comes back, not wait until tomorrow: a stale model costs more than
+        # a late retrain. Twelve hours covers any plausible outage without
+        # letting a run land on top of the next scheduled one.
+        misfire_grace_time=12 * 60 * 60,
+    )
     return scheduler
 
 
@@ -61,10 +76,11 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     scheduler.start()
     logger.info(
-        "scheduler started: symbol=%s interval=%s poll=%dmin",
+        "scheduler started: symbol=%s interval=%s poll=%dmin retrain='%s'",
         settings.binance_symbol,
         settings.binance_interval,
         settings.ingest_interval_minutes,
+        settings.retrain_cron,
     )
 
     try:

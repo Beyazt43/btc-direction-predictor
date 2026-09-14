@@ -126,6 +126,54 @@ async def register_version(
     logger.info("registered %s %s (active=%s)", model_name, version_id, activate)
 
 
+async def activate_version(session: AsyncSession, model_name: str, version_id: str) -> None:
+    """Make a registered version the live one, retiring the incumbent.
+
+    This is rollback: any prior version can be re-activated. Done in one
+    transaction because the partial unique index allows exactly one active
+    version per model, so retire-then-activate must not be observable as two
+    states.
+    """
+    now = datetime.now(UTC)
+    exists = await session.scalar(
+        sa.select(model_versions.c.id).where(
+            model_versions.c.model_name == model_name,
+            model_versions.c.model_version == version_id,
+        )
+    )
+    if exists is None:
+        raise ValueError(f"no registered version {version_id!r} for {model_name!r}")
+
+    await session.execute(
+        sa.update(model_versions)
+        .where(
+            model_versions.c.model_name == model_name,
+            model_versions.c.activated_at.is_not(None),
+            model_versions.c.retired_at.is_(None),
+            model_versions.c.model_version != version_id,
+        )
+        .values(retired_at=now)
+    )
+    await session.execute(
+        sa.update(model_versions)
+        .where(
+            model_versions.c.model_name == model_name,
+            model_versions.c.model_version == version_id,
+        )
+        .values(activated_at=now, retired_at=None)
+    )
+    logger.info("activated %s %s", model_name, version_id)
+
+
+async def list_versions(
+    session: AsyncSession, model_name: str | None = None
+) -> list[dict[str, Any]]:
+    stmt = sa.select(model_versions).order_by(model_versions.c.trained_at.desc())
+    if model_name:
+        stmt = stmt.where(model_versions.c.model_name == model_name)
+    return [dict(r) for r in (await session.execute(stmt)).mappings()]
+
+
 async def active_version(session: AsyncSession, model_name: str) -> dict[str, Any] | None:
     """The version currently live for a model, if any."""
     stmt = sa.select(model_versions).where(

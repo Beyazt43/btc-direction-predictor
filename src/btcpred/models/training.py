@@ -129,6 +129,7 @@ def random_search(
     n_configs: int = 30,
     seed: int = 0,
     objective: str = "log_loss",
+    seeded_configs: Sequence[dict[str, Any]] = (),
 ) -> tuple[dict[str, Any], list[WalkForwardReport]]:
     """Select GBT hyperparameters on walk-forward folds only.
 
@@ -136,18 +137,24 @@ def random_search(
     the base rate, log loss discriminates between configurations that are
     confidently wrong and ones that are honestly uncertain, which is the
     difference that matters for §7's probability comparison.
+
+    `seeded_configs` are evaluated alongside the random draws. The daily retrain
+    passes the incumbent's hyperparameters here, so a bad random draw can never
+    regress the deployed configuration: yesterday's choice is always in the
+    running, and today's search has to beat it on today's data to replace it.
     """
     rng = np.random.default_rng(seed)
     reports: list[WalkForwardReport] = []
+    candidates = [dict(c) for c in seeded_configs] + [sample_params(rng) for _ in range(n_configs)]
 
-    for i in range(n_configs):
-        params = sample_params(rng)
+    for i, params in enumerate(candidates):
         report = walk_forward_evaluate(lambda p=params: GbtDirectionModel(p), frame, folds)
         reports.append(report)
         logger.info(
-            "config %d/%d: log_loss=%.5f acc=%.4f",
+            "config %d/%d%s: log_loss=%.5f acc=%.4f",
             i + 1,
-            n_configs,
+            len(candidates),
+            " (incumbent)" if i < len(seeded_configs) else "",
             report.pooled.log_loss if report.pooled.log_loss is not None else float("nan"),
             report.pooled.accuracy,
         )

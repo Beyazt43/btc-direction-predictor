@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     model_dir: Path = Path("models")
     holdout_days: int = 60
 
+    # Touched at the end of every successful tick. The container healthcheck
+    # fails if it goes stale, which is the only way a hung event loop -- as
+    # opposed to a crashed process -- becomes visible to Docker.
+    heartbeat_path: Path = Path("heartbeat")
+
     # App
     log_level: str = "INFO"
     environment: str = "development"

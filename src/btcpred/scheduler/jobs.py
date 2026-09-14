@@ -5,7 +5,9 @@ a bad Binance response or a brief database outage, because the next tick is the
 recovery mechanism. Jobs therefore log and swallow, rather than propagate.
 """
 
+import asyncio
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,11 +16,12 @@ from btcpred.db.session import session_scope
 from btcpred.ingest.binance import interval_to_timedelta
 from btcpred.ingest.service import SyncResult, run_sync
 from btcpred.predict.repository import resolve_predictions
-from btcpred.predict.service import PredictionResult, generate_predictions
+from btcpred.predict.service import PredictionResult, clear_model_cache, generate_predictions
 
 logger = logging.getLogger(__name__)
 
 TICK_JOB_ID = "lifecycle_tick"
+RETRAIN_JOB_ID = "daily_retrain"
 # Kept for callers that reference the ingest job by its original id.
 INGEST_JOB_ID = TICK_JOB_ID
 
@@ -103,4 +106,47 @@ async def tick_job() -> TickResult:
     ingest = await ingest_job()
     resolved = await resolve_job()
     predictions = await predict_job()
+    _beat()
     return TickResult(ingest=ingest, resolved=resolved, predictions=predictions)
+
+
+def _beat() -> None:
+    """Record that a tick completed, for the container healthcheck."""
+    try:
+        Path(get_settings().heartbeat_path).touch()
+    except OSError:
+        logger.exception("could not write heartbeat")
+
+
+async def retrain_job() -> int:
+    """Run the daily retrain in a subprocess, returning its exit code.
+
+    A subprocess rather than an in-process call for one reason: fitting is
+    CPU-bound, and inside the event loop it would stall the two-minute tick for
+    the better part of a minute. Reusing the CLI also means the scheduled path
+    and the manual path are the same code, exit code included (2 means a
+    version was trained but refused by the activation gate).
+    """
+    logger.info("starting daily retrain")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "btcpred.models",
+        "train",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    output, _ = await proc.communicate()
+    text = output.decode(errors="replace")
+
+    if proc.returncode == 0:
+        logger.info("retrain finished; new versions active\n%s", text)
+    elif proc.returncode == 2:
+        logger.warning("retrain finished but a version was refused by the gate\n%s", text)
+    else:
+        logger.error("retrain failed (exit %s)\n%s", proc.returncode, text)
+
+    # Whatever happened, the next tick must consult the registry afresh rather
+    # than serve a version that may just have been retired.
+    clear_model_cache()
+    return int(proc.returncode or 0)

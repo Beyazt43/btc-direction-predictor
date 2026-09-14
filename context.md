@@ -1,15 +1,16 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **the live loop is running; the next design step is the retraining job (§9 item 3).**
+> Status: **the live loop is running with daily gated retraining; the next design step is drift detection (§9 item 4).**
 > Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for all three tables,
 > Binance ingestion (idempotent, self-healing, closed-candles-only), the feature builder and label
 > construction, both models with walk-forward evaluation, the `model_versions` registry with artifacts,
-> and the scheduler tick that runs ingest → resolve → predict every 2 minutes.
+> the scheduler tick that runs ingest → resolve → predict every 2 minutes, and the daily retrain
+> with gated activation, rollback, a heartbeat healthcheck and restart policies.
 > **Predictions have been logging since 2026-09-14**, so downtime now loses data that cannot be
 > back-generated (§10). Always-on hosting is due, not deferred.
 > Not yet built: the `api` service (compose points at a `btcpred.api.main:app` that does not exist),
-> retraining job, drift detection, dashboard.
+> drift detection, dashboard, the one-time §8 holdout evaluation.
 ---
 
 ## 1. Project Goal
@@ -342,7 +343,7 @@ Work through these in order, same step-by-step mode:
 
 1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that ARIMA doesn't.
 2. ~~**Model layer implementation detail**~~ — **RESOLVED, see §7.** Fixed ARIMA(1,0,0) with coefficients refit each retrain, no seasonal terms (so the honest name is **ARIMA**, not SARIMA or SARIMAX); focused ~30-config random search over shallow trees for the GBT; both versioned in the `model_versions` registry (§4) with explicit `activated_at`/`retired_at` validity windows and artifacts on a Docker named volume.
-3. **Retraining job** — daily cadence; expanding vs. sliding window in production; what triggers an off-schedule retrain; model versioning & rollback. **Carries a constraint from §5:** model versions and their validity windows must stay recoverable, or missed predictions can never be back-generated honestly.
+3. ~~**Retraining job**~~ — **RESOLVED.** Daily at `RETRAIN_CRON` (02:00 UTC), with a 12h misfire grace so a retrain missed during downtime runs on boot rather than tomorrow. **Production trains on all data** — the 60-day holdout is a writeup device evaluated once by a model trained only on data before it, and the live prediction log is the real out-of-sample test for anything deployed. **The incumbent's hyperparameters are always seeded into the search**, so a bad random draw can never regress the deployed configuration; that reduces the activation gate to two catastrophe checks (worse than a coin flip at log loss ≥ 0.70, or worse than the incumbent's reference by > 0.01), both an order of magnitude wider than day-to-day noise. **No off-schedule trigger**: daily cadence caps staleness at 24h while §8's drift signal is a 30-day window, so drift should raise an alert (item 4), not a retrain. Rollback is `python -m btcpred.models activate <model> <version>`. Retrain runs as a subprocess so CPU-bound fitting cannot stall the 2-minute tick. The §5 constraint is met: `model_versions` records validity windows and every prediction carries a FK to its version.
 4. **Drift detection** — concrete thresholds using §8's CI numbers; what triggers an *alert* vs. a *retrain*; whether to also monitor feature drift (PSI / KS) in addition to performance drift.
 5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.
 

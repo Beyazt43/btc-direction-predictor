@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     binance_interval: str = "1h"
 
     # Scheduler
-    ingest_interval_minutes: int = 10
+    ingest_interval_minutes: int = 2
     retrain_cron: str = "0 2 * * *"
 
     # Models

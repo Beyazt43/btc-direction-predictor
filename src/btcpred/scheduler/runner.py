@@ -15,7 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from btcpred.config import Settings, get_settings
 from btcpred.db.session import get_engine
-from btcpred.scheduler.jobs import INGEST_JOB_ID, ingest_job
+from btcpred.scheduler.jobs import TICK_JOB_ID, tick_job
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,10 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=UTC)
 
     scheduler.add_job(
-        ingest_job,
+        tick_job,
         IntervalTrigger(minutes=settings.ingest_interval_minutes),
-        id=INGEST_JOB_ID,
-        name="ingest price bars",
+        id=TICK_JOB_ID,
+        name="lifecycle tick (ingest, resolve, predict)",
         # A slow tick (a first-run backfill, say) must not overlap the next one:
         # concurrent runs would race on the same rows and duplicate requests.
         max_instances=1,

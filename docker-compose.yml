@@ -14,6 +14,7 @@ services:
 
   migrate:
     build: .
+    image: btcpred:local
     env_file: .env
     depends_on:
       db:
@@ -22,7 +23,7 @@ services:
     restart: "no"
 
   api:
-    build: .
+    image: btcpred:local
     env_file: .env
     depends_on:
       db:
@@ -36,7 +37,7 @@ services:
       - models:/app/models
 
   scheduler:
-    build: .
+    image: btcpred:local
     env_file: .env
     depends_on:
       db:

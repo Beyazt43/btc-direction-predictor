@@ -147,29 +147,44 @@ async def load_bars(
     )
 
 
-async def build_feature_row(
+async def build_feature_window(
     session: AsyncSession,
     as_of_time: pd.Timestamp,
     *,
     symbol: str = "BTCUSDT",
-) -> pd.Series:
-    """Features as of `as_of_time`, for live inference.
+) -> pd.DataFrame:
+    """The warmup window of features ending at `as_of_time`, for live inference.
 
-    Loads only the warmup window rather than all history, but computes through
-    the same function training uses, so the resulting row is identical to the
-    one training would have produced for this timestamp.
+    Sequence models (ARIMA) need the run-up to filter their state; row-wise
+    models only need the final row. Both are served from this one frame, which
+    is computed through the same function training uses, so what the live
+    system sees is identical to what training would have produced.
     """
     bars = await load_bars(session, as_of_time=as_of_time, symbol=symbol, limit=WARMUP_BARS)
     if len(bars) < WARMUP_BARS:
         raise InsufficientHistoryError(
             f"need {WARMUP_BARS} bars as of {as_of_time}, found {len(bars)}"
         )
+    if bars["open_time"].iloc[-1] != as_of_time:
+        raise InsufficientHistoryError(
+            f"no bar at {as_of_time}; newest available is {bars['open_time'].iloc[-1]}"
+        )
 
     features = compute_features(bars)
-    row = features.iloc[-1]
-    if row[list(FEATURE_NAMES)].isna().any():
+    if features.iloc[-1][list(FEATURE_NAMES)].isna().any():
         raise InsufficientHistoryError(f"incomplete feature row at {as_of_time}")
-    return row
+    return features
+
+
+async def build_feature_row(
+    session: AsyncSession,
+    as_of_time: pd.Timestamp,
+    *,
+    symbol: str = "BTCUSDT",
+) -> pd.Series:
+    """Features as of `as_of_time`, as a single row."""
+    window = await build_feature_window(session, as_of_time, symbol=symbol)
+    return window.iloc[-1]
 
 
 async def build_training_frame(

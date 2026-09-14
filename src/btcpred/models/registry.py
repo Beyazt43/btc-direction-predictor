@@ -63,8 +63,17 @@ def save_artifact(model: DirectionModel, model_dir: Path, version_id: str) -> Pa
     return path
 
 
-def load_artifact(path: Path | str) -> DirectionModel:
-    return joblib.load(Path(path))
+def load_artifact(path: Path | str, model_dir: Path | None = None) -> DirectionModel:
+    """Load a persisted model.
+
+    Registry paths are relative POSIX strings; when `model_dir` is given they
+    are resolved against it, so a version trained elsewhere loads from the
+    local volume rather than from wherever it happened to be saved.
+    """
+    p = Path(path)
+    if model_dir is not None and not p.is_absolute():
+        p = Path(model_dir) / p.name
+    return joblib.load(p)
 
 
 async def register_version(
@@ -104,7 +113,10 @@ async def register_version(
             model_version=version_id,
             train_start=train_start,
             train_end=train_end,
-            artifact_path=str(artifact_path),
+            # POSIX form regardless of host: the path is written by whichever
+            # process trained (a Windows dev box, say) and read by the Linux
+            # container, and a backslash survives neither direction.
+            artifact_path=Path(artifact_path).as_posix(),
             hyperparameters=hyperparameters,
             feature_names=feature_names,
             reference_metrics=reference_metrics,

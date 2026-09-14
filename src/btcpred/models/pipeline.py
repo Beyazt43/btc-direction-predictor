@@ -22,16 +22,18 @@ from btcpred.features.dataset import build_training_dataset
 from btcpred.models.arima import ArimaDirectionModel
 from btcpred.models.base import DirectionModel
 from btcpred.models.gbt import GbtDirectionModel
+from btcpred.models.metrics import Evaluation
 from btcpred.models.registry import (
     active_version,
     make_version_id,
     register_version,
     save_artifact,
 )
-from btcpred.models.splits import split_holdout
+from btcpred.models.splits import split_holdout_by_time
 from btcpred.models.training import (
     WalkForwardReport,
     build_folds,
+    evaluate_holdout,
     random_search,
     walk_forward_evaluate,
 )
@@ -127,7 +129,7 @@ async def train_model(
     if include_holdout:
         train = dataset.reset_index(drop=True)
     else:
-        dev_idx, _ = split_holdout(len(dataset), settings.holdout_days * 24)
+        dev_idx, _ = split_holdout_by_time(dataset["open_time"], *holdout_bounds(settings))
         train = dataset.iloc[dev_idx].reset_index(drop=True)
     logger.info(
         "%s: dataset=%d train=%d (holdout %s)",
@@ -245,6 +247,97 @@ async def train_all(
             seed=seed,
         )
     return results
+
+
+def holdout_bounds(settings: Settings) -> tuple[pd.Timestamp, pd.Timestamp]:
+    return (
+        pd.Timestamp(settings.holdout_start, tz="UTC"),
+        pd.Timestamp(settings.holdout_end, tz="UTC"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HoldoutResult:
+    model_name: str
+    window: tuple[pd.Timestamp, pd.Timestamp]
+    n_train: int
+    n_holdout: int
+    walk_forward: WalkForwardReport
+    holdout: Evaluation
+
+
+async def evaluate_frozen_holdout(
+    session: AsyncSession,
+    model_name: str,
+    *,
+    settings: Settings | None = None,
+    dataset: pd.DataFrame | None = None,
+    n_configs: int = 30,
+    seed: int = 0,
+) -> HoldoutResult:
+    """The one-time §8 evaluation on the frozen window.
+
+    Trains a fresh model on data strictly before `holdout_start`, with its own
+    hyperparameter search confined to that data, then scores it once on
+    [holdout_start, holdout_end). Nothing here touches the registry: this is a
+    number for the writeup, not a version for deployment.
+
+    Run it once. Each additional run is a chance to react to the result, and a
+    holdout that has been reacted to is no longer a holdout.
+    """
+    settings = settings or get_settings()
+    if dataset is None:
+        dataset = await build_training_dataset(session, symbol=settings.binance_symbol)
+
+    start, end = holdout_bounds(settings)
+    dev_idx, holdout_idx = split_holdout_by_time(dataset["open_time"], start, end)
+    dev = dataset.iloc[dev_idx].reset_index(drop=True)
+    folds = build_folds(len(dev))
+
+    if model_name == "arima":
+        report = walk_forward_evaluate(ArimaDirectionModel, dev, folds)
+        model: DirectionModel = ArimaDirectionModel()
+    elif model_name == "xgboost":
+        best_params, _ = random_search(dev, folds, n_configs=n_configs, seed=seed)
+        report = walk_forward_evaluate(lambda: GbtDirectionModel(best_params), dev, folds)
+        model = GbtDirectionModel(best_params)
+    else:
+        raise ValueError(f"unknown model: {model_name!r}")
+
+    model.fit(dev)
+
+    # Score on the full frame so sequence models have the run-up they need;
+    # only the holdout rows are read.
+    frame = dataset.reset_index(drop=True)
+    result = evaluate_holdout(model, frame, holdout_idx)
+
+    return HoldoutResult(
+        model_name=model_name,
+        window=(start, end),
+        n_train=len(dev),
+        n_holdout=len(holdout_idx),
+        walk_forward=report,
+        holdout=result,
+    )
+
+
+def format_holdout(result: HoldoutResult) -> str:
+    wf = result.walk_forward.pooled
+    ho = result.holdout
+    start, end = result.window
+    return "\n".join(
+        [
+            f"{result.model_name}  holdout [{start:%Y-%m-%d} .. {end:%Y-%m-%d})  "
+            f"train={result.n_train} holdout={result.n_holdout}",
+            f"  walk-forward (selection)  acc={wf.accuracy:.4f}  ll={wf.log_loss:.5f}  "
+            f"mcc={wf.mcc:+.4f}",
+            f"  holdout (touched once)    acc={ho.accuracy:.4f}  ll={ho.log_loss:.5f}  "
+            f"mcc={ho.mcc:+.4f}  auc={ho.auc:.4f}",
+            f"  majority={ho.majority_baseline:.4f}  persistence={ho.persistence_baseline:.4f}  "
+            f"SE={ho.standard_error:.4f}  edge={ho.edge_over_majority:+.4f}  "
+            f"clears 2SE: {ho.beats_majority}",
+        ]
+    )
 
 
 def format_report(trained: TrainedModel) -> str:

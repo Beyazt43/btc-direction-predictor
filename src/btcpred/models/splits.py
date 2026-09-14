@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 
 WindowMode = Literal["expanding", "sliding"]
 
@@ -116,3 +117,33 @@ def describe(folds: Sequence[Fold]) -> str:
             f"({f.train_size}) gap={f.gap()} test[{f.test[0]}:{f.test[-1] + 1}] ({f.test_size})"
         )
     return "\n".join(lines)
+
+
+def split_holdout_by_time(
+    open_times: pd.Series,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    embargo: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Carve off a holdout pinned to a date range rather than a trailing count.
+
+    A trailing window drifts forward as data accrues and, once production
+    trains on everything, becomes data the search has already tuned on. A
+    fixed [start, end) window cannot move, which is what makes "touched once"
+    a property that survives a living system.
+
+    Development data ends `embargo` bars before `start`: the last development
+    row's label depends on the bar after it, which would otherwise be the first
+    holdout bar.
+    """
+    times = pd.to_datetime(open_times, utc=True).reset_index(drop=True)
+    dev = np.flatnonzero(times < start)
+    holdout = np.flatnonzero((times >= start) & (times < end))
+
+    if len(holdout) == 0:
+        raise ValueError(f"no bars fall inside the holdout window [{start}, {end})")
+    if embargo:
+        dev = dev[:-embargo] if len(dev) > embargo else dev[:0]
+    if len(dev) == 0:
+        raise ValueError("holdout window leaves no development data before it")
+    return dev, holdout

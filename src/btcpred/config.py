@@ -1,3 +1,4 @@
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
@@ -28,7 +29,14 @@ class Settings(BaseSettings):
     # Trained artifacts live on a Docker named volume, with the path recorded in
     # the model_versions registry.
     model_dir: Path = Path("models")
-    holdout_days: int = 60
+
+    # The frozen holdout window for the one-time §8 evaluation: the 60 days
+    # ending at the first live prediction (2026-09-14). Pinned to dates rather
+    # than a trailing count on purpose. Production retrains train on everything
+    # and select hyperparameters on it, so a trailing window would drift forward
+    # each day and quietly become tuned-on data. A fixed window cannot.
+    holdout_start: date = date(2026, 7, 16)
+    holdout_end: date = date(2026, 9, 14)
 
     # Touched at the end of every successful tick. The container healthcheck
     # fails if it goes stale, which is the only way a hung event loop -- as

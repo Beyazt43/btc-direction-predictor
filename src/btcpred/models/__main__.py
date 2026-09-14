@@ -14,7 +14,14 @@ import logging
 
 from btcpred.config import get_settings
 from btcpred.db.session import get_engine, session_scope
-from btcpred.models.pipeline import format_report, train_all, train_model
+from btcpred.models.pipeline import (
+    MODEL_NAMES,
+    evaluate_frozen_holdout,
+    format_holdout,
+    format_report,
+    train_all,
+    train_model,
+)
 from btcpred.models.registry import activate_version, list_versions
 
 
@@ -68,6 +75,24 @@ async def cmd_versions(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_evaluate_holdout(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    print(
+        f"Evaluating on the frozen holdout [{settings.holdout_start} .. {settings.holdout_end}).\n"
+        "This is the §8 number for the writeup. It is meant to be run ONCE: every rerun is a\n"
+        "chance to react to the result, and a holdout you have reacted to is no longer one.\n"
+    )
+    names = MODEL_NAMES if args.model == "all" else (args.model,)
+    async with session_scope() as session:
+        for name in names:
+            result = await evaluate_frozen_holdout(
+                session, name, settings=settings, n_configs=args.n_configs, seed=args.seed
+            )
+            print(format_holdout(result))
+            print()
+    return 0
+
+
 async def cmd_activate(args: argparse.Namespace) -> int:
     async with session_scope() as session:
         await activate_version(session, args.model, args.version)
@@ -96,6 +121,14 @@ def main() -> None:
     versions = sub.add_parser("versions", help="list registered versions")
     versions.add_argument("--model", choices=["arima", "xgboost"], default=None)
     versions.set_defaults(func=cmd_versions)
+
+    holdout = sub.add_parser(
+        "evaluate-holdout", help="score the frozen §8 holdout window once, for the writeup"
+    )
+    holdout.add_argument("--model", choices=["all", "arima", "xgboost"], default="all")
+    holdout.add_argument("--n-configs", type=int, default=30)
+    holdout.add_argument("--seed", type=int, default=0, help="fixed so the number is reproducible")
+    holdout.set_defaults(func=cmd_evaluate_holdout)
 
     activate = sub.add_parser("activate", help="make a registered version live (rollback)")
     activate.add_argument("model", choices=["arima", "xgboost"])

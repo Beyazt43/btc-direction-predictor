@@ -1,7 +1,8 @@
 import numpy as np
+import pandas as pd
 import pytest
 
-from btcpred.models.splits import split_holdout, walk_forward_splits
+from btcpred.models.splits import split_holdout, split_holdout_by_time, walk_forward_splits
 
 
 def test_test_blocks_are_contiguous_and_chronological():
@@ -96,3 +97,53 @@ def test_folds_over_dev_never_reach_the_holdout():
 
     highest_seen = max(int(np.concatenate([f.train, f.test]).max()) for f in folds)
     assert highest_seen < holdout[0]
+
+
+def _hourly(n: int, start: str = "2026-06-01") -> pd.Series:
+    return pd.Series(pd.date_range(start, periods=n, freq="h", tz="UTC"))
+
+
+def test_frozen_holdout_is_pinned_to_the_dates():
+    times = _hourly(24 * 120)  # June through September
+    start = pd.Timestamp("2026-07-16", tz="UTC")
+    end = pd.Timestamp("2026-09-14", tz="UTC")
+
+    dev, holdout = split_holdout_by_time(times, start, end)
+
+    assert times[holdout[0]] == start
+    assert times[holdout[-1]] == end - pd.Timedelta(hours=1)
+    assert len(holdout) == 60 * 24
+
+
+def test_frozen_holdout_does_not_move_when_data_accrues():
+    """The property a trailing window lacks: more data must not shift the window."""
+    start = pd.Timestamp("2026-07-16", tz="UTC")
+    end = pd.Timestamp("2026-09-14", tz="UTC")
+
+    _, before = split_holdout_by_time(_hourly(24 * 110), start, end)
+    _, after = split_holdout_by_time(_hourly(24 * 200), start, end)
+
+    assert len(before) == len(after) == 60 * 24
+    assert before[0] == after[0]
+
+
+def test_frozen_holdout_embargoes_the_bar_before_it():
+    """The last development row's label reaches into the first holdout bar."""
+    times = _hourly(24 * 120)
+    start = pd.Timestamp("2026-07-16", tz="UTC")
+    end = pd.Timestamp("2026-09-14", tz="UTC")
+
+    dev, holdout = split_holdout_by_time(times, start, end, embargo=1)
+
+    assert times[dev[-1]] == start - pd.Timedelta(hours=2)
+    assert holdout[0] - dev[-1] == 2, "exactly one embargoed bar between them"
+
+
+def test_frozen_holdout_needs_data_on_both_sides():
+    start = pd.Timestamp("2026-07-16", tz="UTC")
+    end = pd.Timestamp("2026-09-14", tz="UTC")
+
+    with pytest.raises(ValueError, match="no bars"):
+        split_holdout_by_time(_hourly(24 * 10, "2026-05-01"), start, end)
+    with pytest.raises(ValueError, match="no development"):
+        split_holdout_by_time(_hourly(24 * 10, "2026-07-16"), start, end)

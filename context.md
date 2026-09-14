@@ -1,16 +1,17 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **the live loop is running with daily gated retraining; the next design step is drift detection (§9 item 4).**
+> Status: **the live loop is running with daily gated retraining and drift monitoring; the next design step is the service layer (§9 item 5).**
 > Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for all three tables,
 > Binance ingestion (idempotent, self-healing, closed-candles-only), the feature builder and label
 > construction, both models with walk-forward evaluation, the `model_versions` registry with artifacts,
 > the scheduler tick that runs ingest → resolve → predict every 2 minutes, and the daily retrain
-> with gated activation, rollback, a heartbeat healthcheck and restart policies.
+> with gated activation, rollback, a heartbeat healthcheck and restart policies, the frozen §8 holdout
+> window with its one-time `evaluate-holdout` command, and daily drift checks recorded to `drift_checks`.
 > **Predictions have been logging since 2026-09-14**, so downtime now loses data that cannot be
 > back-generated (§10). Always-on hosting is due, not deferred.
 > Not yet built: the `api` service (compose points at a `btcpred.api.main:app` that does not exist),
-> drift detection, dashboard, the one-time §8 holdout evaluation.
+> the `api` service and dashboard; the one-time §8 holdout evaluation has not been run.
 ---
 
 ## 1. Project Goal
@@ -136,6 +137,26 @@ CREATE UNIQUE INDEX uq_model_versions_one_active_per_model ON model_versions (mo
 ALTER TABLE predictions ADD CONSTRAINT fk_predictions_model_version
     FOREIGN KEY (model_name, model_version)
     REFERENCES model_versions (model_name, model_version);
+```
+
+```sql
+CREATE TABLE drift_checks (
+    id                 BIGSERIAL PRIMARY KEY,
+    checked_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    model_name         TEXT NOT NULL,
+    window_start       TIMESTAMPTZ NOT NULL,       -- observed: last 30 days of live calls
+    window_end         TIMESTAMPTZ NOT NULL,
+    observed_n         INTEGER NOT NULL,
+    observed_accuracy  DOUBLE PRECISION,
+    majority_baseline  DOUBLE PRECISION,
+    reference_n        INTEGER NOT NULL,           -- reference: every live call before the window
+    reference_accuracy DOUBLE PRECISION,
+    z_score            DOUBLE PRECISION,
+    status             TEXT NOT NULL,              -- ok | alert | warming_up | insufficient
+    reason             TEXT,
+    feature_psi        JSONB,                      -- diagnostic, never an alert source
+    CHECK (status IN ('ok','alert','warming_up','insufficient'))
+);
 ```
 
 ### Schema design rationale (for the writeup)
@@ -330,10 +351,15 @@ At true accuracy ≈ 0.50, SE = `√(0.25/n)`:
 
 "Why the drift threshold is what it is" is a strong README paragraph — most portfolio projects skip this reasoning.
 
-### Reference vs. observed
-- **Reference** = walk-forward accuracy, stored with each model version.
-- **Observed** = rolling accuracy computed from the `predictions` table.
-- **Drift** = divergence between them, tested against the CI table above.
+### Reference vs. observed — **REVISED when built (2026-09-14)**
+- **Observed** = accuracy over the last 30 days of *live* calls (`is_live`), one per target hour.
+- **Reference** = accuracy over every live call *before* that window — **the live log's own history, not the walk-forward number.** The stored XGBoost walk-forward figure is the maximum over a 30-config search and reads high; measured against it, the model would look like it was drifting from day one. Comparing the log to its own history sidesteps the bias entirely and is the ordinary definition of concept drift. Cost: for the first 30 days only the sanity floor applies, which is all the SE table above says a short window can support anyway.
+- **Drift** = pooled two-proportion z, one-sided, alert at **z < −2**. At n=720 that is ~3.7pp, matching the table; a 3-point drop does not reach it, by design. An improvement is never an alert.
+- **Sanity floor** from week one regardless of history: alert if the window's accuracy is 2σ below its own majority baseline.
+- **Alert, never retrain.** Daily retraining already caps staleness at 24h; a 30-day signal fires long after any fix has shipped. What an alert asks is *did the world move or did the model*, and that is what feature PSI is attached for.
+
+### Feature drift — **DECIDED: diagnostic on alerts, never an alert source**
+PSI per feature against the active version's training deciles (stored with each version), computed every check and surfaced only when a performance alert fires. Real data shows why it cannot be an alert: `rv_168` and `ret_mean_168` read PSI 1.2–1.8 *every day*, because 720 values of a 168-hour rolling statistic are about four independent samples and cannot match a two-year distribution whatever the regime — while `close_pos` sits at 0.01. The conventional 0.1/0.2 thresholds apply only to fast features; for slow ones the value is the *ranking*, day over day.
 
 ---
 
@@ -344,7 +370,7 @@ Work through these in order, same step-by-step mode:
 1. **Feature engineering** — contents of `build_feature_row(as_of_time)`; lag structure; what the GBT sees that ARIMA doesn't.
 2. ~~**Model layer implementation detail**~~ — **RESOLVED, see §7.** Fixed ARIMA(1,0,0) with coefficients refit each retrain, no seasonal terms (so the honest name is **ARIMA**, not SARIMA or SARIMAX); focused ~30-config random search over shallow trees for the GBT; both versioned in the `model_versions` registry (§4) with explicit `activated_at`/`retired_at` validity windows and artifacts on a Docker named volume.
 3. ~~**Retraining job**~~ — **RESOLVED.** Daily at `RETRAIN_CRON` (02:00 UTC), with a 12h misfire grace so a retrain missed during downtime runs on boot rather than tomorrow. **Production trains on all data** — the 60-day holdout is a writeup device evaluated once by a model trained only on data before it, and the live prediction log is the real out-of-sample test for anything deployed. **The incumbent's hyperparameters are always seeded into the search**, so a bad random draw can never regress the deployed configuration; that reduces the activation gate to two catastrophe checks (worse than a coin flip at log loss ≥ 0.70, or worse than the incumbent's reference by > 0.01), both an order of magnitude wider than day-to-day noise. **No off-schedule trigger**: daily cadence caps staleness at 24h while §8's drift signal is a 30-day window, so drift should raise an alert (item 4), not a retrain. Rollback is `python -m btcpred.models activate <model> <version>`. Retrain runs as a subprocess so CPU-bound fitting cannot stall the 2-minute tick. The §5 constraint is met: `model_versions` records validity windows and every prediction carries a FK to its version.
-4. **Drift detection** — concrete thresholds using §8's CI numbers; what triggers an *alert* vs. a *retrain*; whether to also monitor feature drift (PSI / KS) in addition to performance drift.
+4. ~~**Drift detection**~~ — **RESOLVED, see §8.** Reference is the live log's own history (not the selection-biased walk-forward number); 30-day window, one-sided 2σ; sanity floor against the majority baseline from week one; alert never retrains; PSI is a diagnostic attached to alerts and never an alert source. Daily at 03:00 UTC, one `drift_checks` row per model per day.
 5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.
 
 **Two decisions deferred on purpose, to be settled when the prediction job is built** (both matter only once something is being predicted):
@@ -355,5 +381,7 @@ Work through these in order, same step-by-step mode:
 ---
 
 ## 10. Build-Order Note
+
+> **Observed 2026-09-14:** Docker Desktop stopped twice in one session on the dev machine. `restart: unless-stopped` recovered the containers within seconds each time, but the second outage still cost the 10:00 and 11:00 live predictions permanently — the system does not back-fill, by design. The host, not drift, is currently the largest threat to the live log.
 
 Because this runs on **real-time data**, get ingestion + prediction logging live **early** — before the dashboard, before the comparison writeup. Prediction history accumulates in wall-clock time and cannot be back-generated honestly. Every day the live loop isn't running is a day of drift-monitoring data permanently lost.

@@ -8,14 +8,16 @@ restarted or scaled independently.
 import asyncio
 import logging
 import signal
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import sqlalchemy as sa
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from btcpred.config import Settings, get_settings
-from btcpred.db.session import get_engine
+from btcpred.db.session import get_engine, session_scope
+from btcpred.db.tables import drift_checks, model_versions
 from btcpred.scheduler.jobs import (
     DRIFT_JOB_ID,
     RETRAIN_JOB_ID,
@@ -48,6 +50,12 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         next_run_time=datetime.now(UTC),
     )
 
+    # The grace period below only covers a job whose time passed while the
+    # process was alive (a blocked event loop). It does NOT cover a cold start:
+    # with an in-memory job store, a process started at 10:00 simply schedules
+    # the next 02:00 and has no idea one was missed. On a machine that is off
+    # overnight the daily jobs would therefore never run. `schedule_catch_up`
+    # handles that case on boot by checking how stale each job's output is.
     scheduler.add_job(
         retrain_job,
         CronTrigger.from_crontab(settings.retrain_cron, timezone=UTC),
@@ -55,10 +63,6 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         name="daily retrain",
         max_instances=1,
         coalesce=True,
-        # A retrain missed because the box was down at 02:00 should run when
-        # it comes back, not wait until tomorrow: a stale model costs more than
-        # a late retrain. Twelve hours covers any plausible outage without
-        # letting a run land on top of the next scheduled one.
         misfire_grace_time=12 * 60 * 60,
     )
 
@@ -72,6 +76,45 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         misfire_grace_time=12 * 60 * 60,
     )
     return scheduler
+
+
+# A daily job whose last output is older than this is pulled forward on boot.
+# Twenty hours rather than 24 so that a catch-up run at 09:30 today still
+# counts as due at 09:00 tomorrow, keeping the cadence daily on a machine that
+# is never on at the scheduled hour.
+STALE_AFTER = timedelta(hours=20)
+# Give the first tick time to catch up on bars before retraining on them.
+CATCH_UP_DELAY = timedelta(minutes=2)
+
+
+async def schedule_catch_up(scheduler: AsyncIOScheduler, now: datetime | None = None) -> list[str]:
+    """Pull forward any daily job whose last output is stale.
+
+    The same self-healing principle as ingestion, applied to the daily jobs:
+    the schedule is a clock, and what makes the system tolerate downtime is
+    checking state on boot rather than trusting that the clock was running.
+    Returns the ids of the jobs that were pulled forward.
+    """
+    now = now or datetime.now(UTC)
+    pulled: list[str] = []
+
+    async with session_scope() as session:
+        last_train = await session.scalar(sa.select(sa.func.max(model_versions.c.trained_at)))
+        last_check = await session.scalar(sa.select(sa.func.max(drift_checks.c.checked_at)))
+
+    def stale(ts: datetime | None) -> bool:
+        return ts is None or now - ts > STALE_AFTER
+
+    if stale(last_train):
+        scheduler.modify_job(RETRAIN_JOB_ID, next_run_time=now + CATCH_UP_DELAY)
+        pulled.append(RETRAIN_JOB_ID)
+        logger.info("retrain is stale (last %s); running in %s", last_train, CATCH_UP_DELAY)
+    if stale(last_check):
+        # After the retrain, so the check reads the new version's quantiles.
+        scheduler.modify_job(DRIFT_JOB_ID, next_run_time=now + CATCH_UP_DELAY * 3)
+        pulled.append(DRIFT_JOB_ID)
+        logger.info("drift check is stale (last %s); running in %s", last_check, CATCH_UP_DELAY * 3)
+    return pulled
 
 
 def _install_signal_handlers(stop: asyncio.Event) -> None:
@@ -100,6 +143,11 @@ async def run_forever(settings: Settings | None = None) -> None:
         settings.retrain_cron,
         settings.drift_cron,
     )
+    try:
+        await schedule_catch_up(scheduler)
+    except Exception:
+        # The cron schedule still stands; only the boot-time catch-up is lost.
+        logger.exception("could not check for stale daily jobs")
 
     try:
         await stop.wait()

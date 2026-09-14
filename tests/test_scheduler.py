@@ -66,3 +66,97 @@ async def test_ingest_job_swallows_failures(monkeypatch):
     monkeypatch.setattr(jobs, "get_settings", make_settings)
 
     assert await ingest_job() is None
+
+
+class _FakeScalarSession:
+    def __init__(self, values):
+        self._values = list(values)
+
+    async def scalar(self, stmt):
+        return self._values.pop(0)
+
+
+def _scope_with(values):
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def scope():
+        yield _FakeScalarSession(values)
+
+    return scope
+
+
+@pytest.mark.asyncio
+async def test_cold_start_does_not_replay_a_missed_cron_on_its_own():
+    """The bug that motivated catch-up: a fresh in-memory store schedules the
+    *next* 02:00 and knows nothing about the one that was missed."""
+    from datetime import UTC, datetime
+
+    from btcpred.scheduler.runner import RETRAIN_JOB_ID
+
+    scheduler = build_scheduler(make_settings())
+    scheduler.start(paused=True)
+    try:
+        nxt = scheduler.get_job(RETRAIN_JOB_ID).next_run_time
+        assert nxt > datetime.now(UTC), "a cold start schedules the future run only"
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_stale_daily_jobs_are_pulled_forward_on_boot(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from btcpred.scheduler import runner
+    from btcpred.scheduler.runner import DRIFT_JOB_ID, RETRAIN_JOB_ID, schedule_catch_up
+
+    now = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
+    # Last retrain 26h ago, last drift check never.
+    monkeypatch.setattr(runner, "session_scope", _scope_with([now - timedelta(hours=26), None]))
+
+    scheduler = build_scheduler(make_settings())
+    scheduler.start(paused=True)
+    try:
+        pulled = await schedule_catch_up(scheduler, now=now)
+        assert pulled == [RETRAIN_JOB_ID, DRIFT_JOB_ID]
+        assert scheduler.get_job(RETRAIN_JOB_ID).next_run_time == now + runner.CATCH_UP_DELAY
+        assert scheduler.get_job(DRIFT_JOB_ID).next_run_time == now + runner.CATCH_UP_DELAY * 3
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_fresh_daily_jobs_are_left_on_their_cron(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from btcpred.scheduler import runner
+    from btcpred.scheduler.runner import DRIFT_JOB_ID, RETRAIN_JOB_ID, schedule_catch_up
+
+    now = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        runner, "session_scope", _scope_with([now - timedelta(hours=3), now - timedelta(hours=2)])
+    )
+
+    scheduler = build_scheduler(make_settings())
+    scheduler.start(paused=True)
+    try:
+        before = {
+            RETRAIN_JOB_ID: scheduler.get_job(RETRAIN_JOB_ID).next_run_time,
+            DRIFT_JOB_ID: scheduler.get_job(DRIFT_JOB_ID).next_run_time,
+        }
+        assert await schedule_catch_up(scheduler, now=now) == []
+        for job_id, t in before.items():
+            assert scheduler.get_job(job_id).next_run_time == t
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+def test_stale_threshold_keeps_a_daily_cadence_on_a_daytime_machine():
+    """A machine on from 09:00 each day: a 09:30 catch-up must count as due
+    again at 09:00 next morning, which 24h would miss and 20h catches."""
+    from datetime import timedelta
+
+    from btcpred.scheduler.runner import STALE_AFTER
+
+    assert timedelta(hours=23, minutes=30) > STALE_AFTER
+    assert timedelta(hours=12) < STALE_AFTER

@@ -1,12 +1,15 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **infrastructure and ingestion are live; the next step is feature engineering (§9 item 1).**
-> Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for both tables,
-> Binance ingestion (idempotent, self-healing, closed-candles-only), and the APScheduler poll loop.
+> Status: **the live loop is running; the next design step is the retraining job (§9 item 3).**
+> Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for all three tables,
+> Binance ingestion (idempotent, self-healing, closed-candles-only), the feature builder and label
+> construction, both models with walk-forward evaluation, the `model_versions` registry with artifacts,
+> and the scheduler tick that runs ingest → resolve → predict every 2 minutes.
+> **Predictions have been logging since 2026-09-14**, so downtime now loses data that cannot be
+> back-generated (§10). Always-on hosting is due, not deferred.
 > Not yet built: the `api` service (compose points at a `btcpred.api.main:app` that does not exist),
-> features, models, retraining, drift detection, dashboard.
-
+> retraining job, drift detection, dashboard.
 ---
 
 ## 1. Project Goal
@@ -56,13 +59,13 @@ Pull **1-hour klines directly.** Do not pull 1-minute and resample. (Sub-hour da
 
 `UNIQUE (symbol, open_time)` + `ON CONFLICT DO NOTHING` (or `DO UPDATE` to allow late candle corrections). Scheduler double-fires and backfills are safe.
 
-### Poll cadence erodes the prediction horizon — **OPEN, revisit with the prediction layer**
+### Poll cadence erodes the prediction horizon — **RESOLVED: `INGEST_INTERVAL_MINUTES=2`**
 
 The cadence above has a consequence that only bites once predictions are being generated. Bar `t` closes at `:59:59.999`, but at a 10-minute poll it may not be *detected* for another 10 minutes. The prediction for `t+1` is therefore logged up to a sixth of the way into the very hour it predicts.
 
 This is **not leakage** — no data from `t+1` is used. But "next-hour predictor" then means, in practice, the remaining ~50 minutes, which is the kind of detail a careful reader will catch in the writeup.
 
-Tightening `INGEST_INTERVAL_MINUTES` to 1–2 closes the gap for almost nothing: `/api/v3/klines` costs weight 2 per request against a generous limit. Decide this when the prediction job is built, not before — it only matters once something is being predicted.
+Tightening `INGEST_INTERVAL_MINUTES` to 1–2 closes the gap for almost nothing: `/api/v3/klines` costs weight 2 per request against a generous limit. Set to 2 minutes when the prediction job was built. Observed live: the 07:00 bar was ingested and the 08:00 prediction logged 43 seconds after the candle closed.
 
 ---
 
@@ -345,8 +348,8 @@ Work through these in order, same step-by-step mode:
 
 **Two decisions deferred on purpose, to be settled when the prediction job is built** (both matter only once something is being predicted):
 
-- **Poll cadence** (§3) — tighten `INGEST_INTERVAL_MINUTES` so predictions are not logged a sixth of the way into the hour they predict.
-- **Always-on hosting** (§10) — a sleeping laptop stops being an acceptable host the moment prediction history starts accruing. Deferred because the resource profile (retrain duration, artifact size) is unknown until the model layer exists.
+- ~~**Poll cadence** (§3)~~ — **done**, 2 minutes.
+- **Always-on hosting** (§10) — **now due.** Prediction history started accruing on 2026-09-14. The resource profile is known: ARIMA artifact ~350 bytes, XGBoost ~320KB, a full retrain with the 30-config search ~50s. Nothing about the workload requires more than the smallest always-on box.
 
 ---
 

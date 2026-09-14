@@ -112,3 +112,32 @@ async def pending_count(session: AsyncSession) -> int:
         .where(predictions.c.actual_direction.is_(None))
     )
     return int(await session.scalar(stmt) or 0)
+
+
+def live_calls(model_name: str, interval: timedelta, *, resolved_only: bool = True) -> sa.Subquery:
+    """One honest call per target hour, as a subquery.
+
+    After a retrain the new version re-predicts the current hour, so a target
+    can carry several live predictions. The earliest is what the system first
+    committed to; counting more than one would double-weight that hour. Drift
+    monitoring and the API both read through this, so they cannot disagree
+    about which rows count.
+    """
+    conditions = [predictions.c.model_name == model_name, is_live(interval)]
+    if resolved_only:
+        conditions.append(predictions.c.actual_direction.is_not(None))
+    return (
+        sa.select(
+            predictions.c.target_open_time,
+            predictions.c.model_version,
+            predictions.c.predicted_at,
+            predictions.c.predicted_direction,
+            predictions.c.predicted_proba,
+            predictions.c.actual_direction,
+            predictions.c.actual_log_return,
+        )
+        .where(*conditions)
+        .distinct(predictions.c.target_open_time)
+        .order_by(predictions.c.target_open_time, predictions.c.predicted_at)
+        .subquery()
+    )

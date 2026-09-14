@@ -37,6 +37,13 @@ services:
     command: uvicorn btcpred.api.main:app --host 0.0.0.0 --port 8000
     volumes:
       - models:/app/models
+    # /health round-trips the database, so this also fails if Postgres is gone.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      start_period: 20s
+      retries: 3
 
   scheduler:
     image: btcpred:local

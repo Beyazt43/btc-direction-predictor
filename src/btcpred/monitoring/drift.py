@@ -27,11 +27,11 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from btcpred.db.tables import drift_checks, predictions
+from btcpred.db.tables import drift_checks
 from btcpred.features.builder import FEATURE_NAMES
 from btcpred.features.dataset import build_training_dataset
 from btcpred.models.registry import active_version
-from btcpred.predict.repository import is_live
+from btcpred.predict.repository import live_calls
 
 logger = logging.getLogger(__name__)
 
@@ -93,30 +93,6 @@ class DriftCheck:
         }
 
 
-def _live_calls(model_name: str, interval: timedelta) -> sa.Subquery:
-    """One honest call per target hour.
-
-    After a retrain the new version re-predicts the current hour, so a target
-    can carry several live predictions. The earliest is what the system first
-    committed to; counting more than one would double-weight that hour.
-    """
-    return (
-        sa.select(
-            predictions.c.target_open_time,
-            predictions.c.predicted_direction,
-            predictions.c.actual_direction,
-        )
-        .where(
-            predictions.c.model_name == model_name,
-            predictions.c.actual_direction.is_not(None),
-            is_live(interval),
-        )
-        .distinct(predictions.c.target_open_time)
-        .order_by(predictions.c.target_open_time, predictions.c.predicted_at)
-        .subquery()
-    )
-
-
 async def sample_accuracy(
     session: AsyncSession,
     model_name: str,
@@ -125,7 +101,7 @@ async def sample_accuracy(
     start: datetime | None,
     end: datetime,
 ) -> Sample:
-    calls = _live_calls(model_name, interval)
+    calls = live_calls(model_name, interval)
     conditions = [calls.c.target_open_time < end]
     if start is not None:
         conditions.append(calls.c.target_open_time >= start)

@@ -1,6 +1,7 @@
 from btcpred.predict.repository import (
     insert_prediction,
     is_live,
+    live_calls,
     pending_count,
     prediction_exists,
     resolve_predictions,
@@ -19,6 +20,7 @@ __all__ = [
     "generate_predictions",
     "insert_prediction",
     "is_live",
+    "live_calls",
     "pending_count",
     "prediction_exists",
     "resolve_predictions",

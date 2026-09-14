@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ symbol }} next-hour direction — live</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --line: #2a3038; --fg: #e6e9ee; --muted: #8b93a1;
+    --arima: #f2a541; --xgb: #4fa3ff; --base: #9aa3b2; --ok: #3ccf7a; --alert: #ff5c5c; --warn: #f2c94c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 18px 24px 10px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+  .status { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); font-size: 13px; }
+  .status b { color: var(--fg); font-family: var(--mono); font-weight: 500; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  .dot.ok { background: var(--ok); } .dot.alert { background: var(--alert); } .dot.warn { background: var(--warn); }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 16px; padding: 16px 24px 32px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+  section h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  section p.sub { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.mono, .mono { font-family: var(--mono); }
+  .arima { color: var(--arima); } .xgb { color: var(--xgb); }
+  .muted { color: var(--muted); }
+  .wide { grid-column: 1 / -1; }
+  canvas { width: 100% !important; }
+  .note { margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-family: var(--mono); }
+  .pill.ok { background: rgba(60,207,122,.15); color: var(--ok); }
+  .pill.alert { background: rgba(255,92,92,.15); color: var(--alert); }
+  .pill.warming_up, .pill.insufficient { background: rgba(242,201,76,.15); color: var(--warn); }
+</style>
+</head>
+<body>
+{% set h = health %}
+{% macro pct(x, d=1) -%}{% if x is none %}<span class="muted">–</span>{% else %}{{ "%.1f"|format(x * 100) }}%{% endif %}{%- endmacro %}
+{% macro num(x, d=3) -%}{% if x is none %}<span class="muted">–</span>{% else %}{{ ("%." ~ d ~ "f")|format(x) }}{% endif %}{%- endmacro %}
+{% macro age(s) -%}{% if s is none %}never{% elif s < 120 %}{{ s|int }}s ago{% elif s < 7200 %}{{ (s/60)|int }}m ago{% else %}{{ (s/3600)|round(1) }}h ago{% endif %}{%- endmacro %}
+
+<header>
+  <h1>{{ symbol }} next-hour direction — ARIMA vs XGBoost, live</h1>
+  <div class="status">
+    <span><span class="dot {{ 'ok' if h.scheduler_ok else 'alert' }}"></span>scheduler
+      <b>{{ 'live' if h.scheduler_ok else 'stale' }}</b></span>
+    <span>last bar <b>{{ age(h.last_bar_age_seconds) }}</b></span>
+    <span>last prediction <b>{{ age(h.last_prediction_age_seconds) }}</b></span>
+    <span>predictions logged <b>{{ h.predictions_logged }}</b></span>
+    <span>active
+      {% for m, v in h.active_versions.items() %}<b class="{{ 'arima' if m == 'arima' else 'xgb' }}">{{ v[-8:] }}</b>{% if not loop.last %} · {% endif %}{% endfor %}
+    </span>
+  </div>
+</header>
+
+<main>
+
+<section class="wide">
+  <h2>Live accuracy — 30-day rolling, with the band it has to clear</h2>
+  <p class="sub">Solid lines: 30-day rolling accuracy. Dashed: rolling majority baseline ("always up"). Shaded: ±2 SE around the baseline at the rolling n. Dots: single-day hit rate, shown so the noise is visible. Only live, resolved calls; one per hour.</p>
+  <canvas id="rolling" height="110"></canvas>
+</section>
+
+<section>
+  <h2>Windows</h2>
+  <p class="sub">§8's sample-size table, live. The 7-day row is indicative only: at n=168 its band is ±7.6pp.</p>
+  <table>
+    <tr><th>model</th><th>window</th><th>n</th><th>accuracy</th><th>majority</th><th>edge</th><th>±2SE</th><th>MCC</th><th>log loss</th></tr>
+    {% for m in models %}{% for w in live[m] %}
+    <tr>
+      <td class="{{ 'arima' if m == 'arima' else 'xgb' }}">{% if loop.first %}{{ m }}{% endif %}</td>
+      <td class="mono">{{ w.window }}{% if w.window == '7d' %} <span class="muted">(indicative)</span>{% endif %}</td>
+      {% set s = w.metrics %}
+      {% if s %}
+      <td class="mono">{{ s.n }}</td>
+      <td class="mono">{{ pct(s.accuracy) }}</td>
+      <td class="mono">{{ pct(s.majority_baseline) }}</td>
+      <td class="mono">{{ "%+.1f"|format(s.edge_over_majority * 100) }}pp</td>
+      <td class="mono">{{ "%.1f"|format(2 * s.standard_error * 100) }}pp{% if s.beats_majority %} <span class="pill ok">clears</span>{% endif %}</td>
+      <td class="mono">{{ "%+.3f"|format(s.mcc) }}</td>
+      <td class="mono">{{ num(s.log_loss, 4) }}</td>
+      {% else %}<td class="mono">0</td><td colspan="6" class="muted">no resolved live calls</td>{% endif %}
+    </tr>
+    {% endfor %}{% endfor %}
+  </table>
+  <p class="note">log loss of 0.6931 is "knows nothing"; MCC near 0 at 52% accuracy is the honest tell.</p>
+</section>
+
+<section>
+  <h2>ARIMA vs XGBoost — paired on the same hours</h2>
+  {% set c = comparison if comparison.n >= 24 else comparison_all %}
+  <p class="sub">Scored only where both made a live call for the hour ({{ c.n }} hours{% if c is sameas comparison %}, last 30 days{% else %}, all time{% endif %}). McNemar tests the paired disagreements — it is what stops 52.3% vs 51.6% being narrated as a difference.</p>
+  {% if c.n %}
+  <table>
+    <tr><th></th><th class="arima">arima</th><th class="xgb">xgboost</th></tr>
+    {% set a = c.models.arima %}{% set b = c.models.xgboost %}
+    <tr><td>accuracy</td><td class="mono">{{ pct(a.accuracy) }}</td><td class="mono">{{ pct(b.accuracy) }}</td></tr>
+    <tr><td>MCC</td><td class="mono">{{ "%+.3f"|format(a.mcc) }}</td><td class="mono">{{ "%+.3f"|format(b.mcc) }}</td></tr>
+    <tr><td>log loss</td><td class="mono">{{ num(a.log_loss, 4) }}</td><td class="mono">{{ num(b.log_loss, 4) }}</td></tr>
+    <tr><td>AUC</td><td class="mono">{{ num(a.auc) }}</td><td class="mono">{{ num(b.auc) }}</td></tr>
+    <tr><td>majority baseline</td><td class="mono" colspan="2">{{ pct(a.majority_baseline) }}</td></tr>
+  </table>
+  {% set mc = c.mcnemar %}
+  <p class="note">only ARIMA right: <b class="mono">{{ mc.a_only_correct|int }}</b> · only XGBoost right: <b class="mono">{{ mc.b_only_correct|int }}</b> · McNemar p = <b class="mono">{{ num(mc.p_value) }}</b>
+    → <b>{{ 'distinguishable' if mc.p_value < 0.05 else 'not distinguishable' }}</b> at this n</p>
+  {% else %}<p class="muted">no paired resolved calls yet</p>{% endif %}
+</section>
+
+<section>
+  <h2>Accuracy by move magnitude</h2>
+  <p class="sub">§6: no dead zone in the label; instead, accuracy sliced post-hoc by |log return| of the hour. Bars are accuracy; n is printed on each. A thin bucket is visibly thin.</p>
+  <canvas id="magnitude" height="150"></canvas>
+</section>
+
+<section>
+  <h2>Drift</h2>
+  <p class="sub">30-day live window vs the live log's own earlier history; one-sided 2σ. Reference is the log, not the walk-forward number (which selection inflates). An alert never retrains.</p>
+  {% if drift %}
+  <table>
+    <tr><th>checked</th><th>model</th><th>status</th><th>obs n</th><th>obs acc</th><th>ref n</th><th>ref acc</th><th>z</th></tr>
+    {% for d in drift[-8:]|reverse %}
+    <tr>
+      <td class="mono">{{ d.checked_at.strftime('%m-%d %H:%M') }}</td>
+      <td class="{{ 'arima' if d.model_name == 'arima' else 'xgb' }}">{{ d.model_name }}</td>
+      <td><span class="pill {{ d.status }}">{{ d.status }}</span></td>
+      <td class="mono">{{ d.observed_n }}</td><td class="mono">{{ pct(d.observed_accuracy) }}</td>
+      <td class="mono">{{ d.reference_n }}</td><td class="mono">{{ pct(d.reference_accuracy) }}</td>
+      <td class="mono">{{ num(d.z_score, 2) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% set last = drift[-1] %}<p class="note">latest: {{ last.reason }}</p>
+  {% else %}<p class="muted">no drift checks recorded yet — first runs at 03:00 UTC</p>{% endif %}
+</section>
+
+</main>
+
+<script>
+const DAILY = {{ daily|tojson }};
+const MAG = {{ magnitude|tojson }};
+const COLORS = { arima: '#f2a541', xgboost: '#4fa3ff' };
+const GRID = { color: '#2a3038' }, TICK = { color: '#8b93a1' };
+
+(function rolling() {
+  const days = [...new Set([].concat(...Object.values(DAILY).map(s => s.map(r => r.day))))].sort();
+  const at = (series, key) => days.map(d => { const r = series.find(x => x.day === d); return r ? r[key] : null; });
+  const datasets = [];
+  for (const [m, series] of Object.entries(DAILY)) {
+    if (!series.length) continue;
+    datasets.push({ label: `${m} 30d rolling`, data: at(series, 'rolling_accuracy'), borderColor: COLORS[m], borderWidth: 2, pointRadius: 0, tension: .25, spanGaps: true });
+    datasets.push({ label: `${m} daily`, data: at(series, 'accuracy'), borderColor: COLORS[m], backgroundColor: COLORS[m], showLine: false, pointRadius: 2.5, pointHoverRadius: 4 });
+  }
+  const ref = Object.values(DAILY).find(s => s.length);
+  if (ref) {
+    const maj = at(ref, 'rolling_majority'), se = at(ref, 'rolling_se');
+    datasets.push({ label: 'majority baseline (30d)', data: maj, borderColor: '#9aa3b2', borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, spanGaps: true });
+    datasets.push({ label: '+2SE', data: maj.map((v, i) => v == null ? null : v + 2 * se[i]), borderWidth: 0, pointRadius: 0, fill: '+1', backgroundColor: 'rgba(154,163,178,.12)', spanGaps: true });
+    datasets.push({ label: '-2SE', data: maj.map((v, i) => v == null ? null : v - 2 * se[i]), borderWidth: 0, pointRadius: 0, spanGaps: true });
+  }
+  new Chart(document.getElementById('rolling'), {
+    type: 'line', data: { labels: days, datasets },
+    options: { responsive: true, animation: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#8b93a1', filter: i => !/SE$/.test(i.text) } } },
+      scales: { x: { grid: GRID, ticks: TICK }, y: { suggestedMin: 0.35, suggestedMax: 0.65, grid: GRID, ticks: { ...TICK, callback: v => (v * 100).toFixed(0) + '%' } } } }
+  });
+})();
+
+(function magnitude() {
+  const labels = MAG.arima.map(b => b.bucket);
+  const datasets = Object.entries(MAG).map(([m, buckets]) => ({
+    label: m, data: buckets.map(b => b.accuracy), backgroundColor: COLORS[m] + 'cc', borderColor: COLORS[m], borderWidth: 1,
+    n: buckets.map(b => b.n)
+  }));
+  new Chart(document.getElementById('magnitude'), {
+    type: 'bar', data: { labels, datasets },
+    options: { responsive: true, animation: false,
+      plugins: { legend: { labels: { color: '#8b93a1' } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.raw == null ? '–' : (c.raw * 100).toFixed(1) + '%'} (n=${c.dataset.n[c.dataIndex]})` } } },
+      scales: { x: { grid: GRID, ticks: TICK }, y: { min: 0, max: 1, grid: GRID, ticks: { ...TICK, callback: v => (v * 100).toFixed(0) + '%' } } } },
+    plugins: [{ id: 'nlabels', afterDatasetsDraw(chart) {
+      const { ctx } = chart; ctx.save(); ctx.fillStyle = '#8b93a1'; ctx.font = '11px ui-monospace, monospace'; ctx.textAlign = 'center';
+      chart.data.datasets.forEach((ds, di) => chart.getDatasetMeta(di).data.forEach((bar, i) => {
+        const n = ds.n[i]; if (n) ctx.fillText('n=' + n, bar.x, Math.min(bar.y, chart.scales.y.getPixelForValue(0.95)) - 4);
+      })); ctx.restore(); } }]
+  });
+})();
+</script>
+</body>
+</html>

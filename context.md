@@ -1,17 +1,17 @@
 # BTC/USD Next-Hour Direction Predictor — Project Context
 
 > Handoff document. Captures architecture decisions made during design discussion, before implementation.
-> Status: **the live loop is running with daily gated retraining and drift monitoring; the next design step is the service layer (§9 item 5).**
-> Built: compose stack (db / migrate / scheduler), `config.py`, Alembic migrations for all three tables,
-> Binance ingestion (idempotent, self-healing, closed-candles-only), the feature builder and label
-> construction, both models with walk-forward evaluation, the `model_versions` registry with artifacts,
-> the scheduler tick that runs ingest → resolve → predict every 2 minutes, and the daily retrain
-> with gated activation, rollback, a heartbeat healthcheck and restart policies, the frozen §8 holdout
-> window with its one-time `evaluate-holdout` command, and daily drift checks recorded to `drift_checks`.
-> **Predictions have been logging since 2026-09-14**, so downtime now loses data that cannot be
+> Status: **every §9 design step is resolved and `docker compose up` brings up the full stack.**
+> Built: compose stack (db / migrate / scheduler / api, all healthchecked, `unless-stopped`), `config.py`,
+> Alembic migrations for all four tables, Binance ingestion (idempotent, self-healing,
+> closed-candles-only), the feature builder and label construction, both models with walk-forward
+> evaluation, the `model_versions` registry with artifacts, the scheduler tick that runs
+> ingest → resolve → predict every 2 minutes, the daily retrain with gated activation and rollback,
+> the frozen §8 holdout window with its one-time `evaluate-holdout` command, daily drift checks
+> recorded to `drift_checks`, and the read-only API with the live dashboard.
+> **Predictions have been logging since 2026-09-14**, so downtime loses data that cannot be
 > back-generated (§10). Always-on hosting is due, not deferred.
-> Not yet built: the `api` service (compose points at a `btcpred.api.main:app` that does not exist),
-> the `api` service and dashboard; the one-time §8 holdout evaluation has not been run.
+> Not yet done: the README/writeup; the one-time §8 holdout evaluation has not been run.
 ---
 
 ## 1. Project Goal
@@ -371,7 +371,7 @@ Work through these in order, same step-by-step mode:
 2. ~~**Model layer implementation detail**~~ — **RESOLVED, see §7.** Fixed ARIMA(1,0,0) with coefficients refit each retrain, no seasonal terms (so the honest name is **ARIMA**, not SARIMA or SARIMAX); focused ~30-config random search over shallow trees for the GBT; both versioned in the `model_versions` registry (§4) with explicit `activated_at`/`retired_at` validity windows and artifacts on a Docker named volume.
 3. ~~**Retraining job**~~ — **RESOLVED.** Daily at `RETRAIN_CRON` (02:00 UTC), with a 12h misfire grace so a retrain missed during downtime runs on boot rather than tomorrow. **Production trains on all data** — the 60-day holdout is a writeup device evaluated once by a model trained only on data before it, and the live prediction log is the real out-of-sample test for anything deployed. **The incumbent's hyperparameters are always seeded into the search**, so a bad random draw can never regress the deployed configuration; that reduces the activation gate to two catastrophe checks (worse than a coin flip at log loss ≥ 0.70, or worse than the incumbent's reference by > 0.01), both an order of magnitude wider than day-to-day noise. **No off-schedule trigger**: daily cadence caps staleness at 24h while §8's drift signal is a 30-day window, so drift should raise an alert (item 4), not a retrain. Rollback is `python -m btcpred.models activate <model> <version>`. Retrain runs as a subprocess so CPU-bound fitting cannot stall the 2-minute tick. The §5 constraint is met: `model_versions` records validity windows and every prediction carries a FK to its version.
 4. ~~**Drift detection**~~ — **RESOLVED, see §8.** Reference is the live log's own history (not the selection-biased walk-forward number); 30-day window, one-sided 2σ; sanity floor against the majority baseline from week one; alert never retrains; PSI is a diagnostic attached to alerts and never an alert source. Daily at 03:00 UTC, one `drift_checks` row per model per day.
-5. **Service layer** — FastAPI structure, endpoints, dashboard for live accuracy + baseline-vs-GBT comparison + accuracy-by-move-magnitude panel. **Carries a constraint from §5:** live and back-generated predictions must be reported as separate lines, using the shared criterion rather than an ad hoc filter per query.
+5. ~~**Service layer**~~ — **RESOLVED.** Read-only FastAPI: every write path stays on the CLI, and a test asserts no route accepts anything but GET. All numbers come from live resolved calls through the one shared `live_calls` subquery (earliest call per target hour) and the same `evaluate`/`mcnemar_test` the training pipeline uses, so the dashboard, the drift job and the training report cannot disagree. Endpoints: `/health`, `/metrics/live` (7d indicative / 30d / all), `/metrics/live/{model}/daily`, `/metrics/comparison` (paired, McNemar), `/metrics/by-magnitude` (fixed bp buckets, n per bucket), `/drift`, `/versions`. Dashboard is one Jinja2 page with Chart.js from a CDN: rolling accuracy with the ±2SE band around the majority baseline, the windows table, the paired comparison, magnitude bars, drift history. The §5 constraint is met by construction: only `is_live` rows are ever counted, and nothing back-generates.
 
 **Two decisions deferred on purpose, to be settled when the prediction job is built** (both matter only once something is being predicted):
 

@@ -32,10 +32,7 @@ Build an MLOps-flavored portfolio project: a BTC/USD **next-hour price direction
 ## 2. Builder Background (calibration for code style / explanation depth)
 
 - Backend-leaning CS student pivoting to AI/ML Engineering.
-- Comfortable: FastAPI, PostgreSQL (asyncpg / SQLModel), Docker + docker-compose, Alembic migrations.
-- Learning: ML fundamentals (Microsoft ML-For-Beginners, IBM ML Professional Certificate — clustering complete). Recently covered classical time-series: ARIMA / SARIMAX / SVR.
-- Implication: infrastructure code can be idiomatic and assume competence. ML-specific choices benefit from explicit reasoning.
-- Working preference: **step-by-step, decision-by-decision.** Do not dump full solutions.
+- Comfortable with: FastAPI, PostgreSQL (asyncpg / SQLModel), Docker + docker-compose, Alembic migrations.
 
 ---
 

@@ -1,0 +1,21 @@
+One-time §8 holdout evaluation
+run at:   2026-09-15T14:30:36Z
+commit:   490b8d8
+command:  docker compose run --rm scheduler python -m btcpred.models evaluate-holdout
+window:   [2026-07-16, 2026-09-14)  -- the 60 days before the first live prediction
+seed 0, 30-config search, training data strictly before the window, registry untouched.
+This file is the receipt. The evaluation is not to be run again.
+
+Evaluating on the frozen holdout [2026-07-16 .. 2026-09-14).
+This is the §8 number for the writeup. It is meant to be run ONCE: every rerun is a
+chance to react to the result, and a holdout you have reacted to is no longer one.
+
+arima  holdout [2026-07-16 .. 2026-09-14)  train=16511 holdout=1440
+  walk-forward (selection)  acc=0.5123  ll=0.69268  mcc=+0.0277
+  holdout (touched once)    acc=0.5215  ll=0.69281  mcc=+0.0428  auc=0.5286
+  majority=0.5083  persistence=0.4764  SE=0.0132  edge=+0.0132  clears 2SE: False
+
+xgboost  holdout [2026-07-16 .. 2026-09-14)  train=16511 holdout=1440
+  walk-forward (selection)  acc=0.5204  ll=0.69172  mcc=+0.0413
+  holdout (touched once)    acc=0.5396  ll=0.69037  mcc=+0.0791  auc=0.5454
+  majority=0.5083  persistence=0.4764  SE=0.0132  edge=+0.0312  clears 2SE: True

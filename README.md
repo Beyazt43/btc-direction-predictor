@@ -2,7 +2,7 @@
 
 A small MLOps system that predicts whether the next hourly BTC/USDT candle closes up or down, and then keeps itself honest about it: it ingests live data, predicts every hour, scores every prediction against what actually happened, retrains daily behind an activation gate, and monitors its own live record for drift.
 
-**This is not a trading bot, and it does not claim to beat the market.** Hourly BTC direction is close to unpredictable, and the system says so — the base rate over two years is 50.36% up, which is statistically indistinguishable from a coin flip, and the classical baseline's order selection concludes the return series is white noise. The point of the project is the machinery around that honest result: the leakage guards, the evaluation discipline, the retraining and monitoring loop, and a model comparison that is argued rather than just tabulated.
+**This is not a trading bot, and it does not claim to beat the market.** Hourly BTC direction is close to unpredictable, and the system says so — the base rate over two years is 50.36% up, which is statistically indistinguishable from a coin flip; the classical baseline's order selection concludes the return series is white noise; and the one model that clears the evaluation bar does so by about three points on a single 60-day window, with a walk-forward estimate a third that size. The point of the project is the machinery around that honest result: the leakage guards, the evaluation discipline, the retraining and monitoring loop, and a model comparison that is argued rather than just tabulated.
 
 The design reasoning lives in [`context.md`](context.md). This README is the tour.
 
@@ -144,22 +144,25 @@ Feature importance after training matched the pre-analysis: `close_pos` leads at
 
 ### Results
 
-Walk-forward over the full history (5 expanding folds, 1-bar embargo, n = 12,830 pooled test rows):
+The offline number is a **one-time evaluation on a frozen holdout**: the 60 days before the first live prediction, `2026-07-16` to `2026-09-14`, n = 1,440 hours. Each model was trained only on data strictly before the window (16,511 rows, with a 1-bar embargo), its hyperparameter search confined to that data, then scored once. The raw output is committed as the receipt in [`docs/holdout_evaluation.txt`](docs/holdout_evaluation.txt); the command will not be run again.
 
-| | accuracy | majority | MCC | log loss | AUC |
-|---|---|---|---|---|---|
-| ARIMA(1,0,0) | 0.5138 | 0.5003 | +0.030 | 0.69276 | 0.519 |
-| XGBoost | 0.5242 | 0.5003 | +0.049 | 0.69114 | 0.538 |
-| *knowing nothing* | 0.5003 | — | 0 | **0.69315** | 0.5 |
+| | walk-forward (selection) | **holdout** | majority | MCC | log loss | AUC | edge | clears ±2 SE (2.6pp)? |
+|---|---|---|---|---|---|---|---|---|
+| ARIMA(1,0,0) | 0.5123 | **0.5215** | 0.5083 | +0.043 | 0.69281 | 0.529 | +1.3pp | no |
+| XGBoost | 0.5204 | **0.5396** | 0.5083 | +0.079 | 0.69037 | 0.545 | +3.1pp | **yes** |
+| *knowing nothing* | | 0.5083 | | 0 | **0.69315** | 0.5 | | |
 
-Read the log-loss column first. `ln 2 = 0.69315` is what predicting 0.5 forever scores. ARIMA beats it by 0.0004; XGBoost by 0.002. Both models are barely informative, and MCC near zero at 52% accuracy is the honest tell that very little is being learned.
+Read it in this order.
 
-**The XGBoost row is optimistically biased.** It is the best of 30 searched configurations, scored on the same folds that selected it. The registry stores it with `selection_biased: true` so it is never read as clean. ARIMA has no search and no bias, so the head-to-head flatters the challenger. Only two things settle it honestly:
+**Log loss first.** `ln 2 = 0.69315` is what predicting 0.5 forever scores. ARIMA beats it by 0.0003; XGBoost by 0.0028. Both models are close to uninformative in absolute terms — the probabilities they emit hover near 0.5 — and MCC of 0.04 and 0.08 says the same thing.
 
-- **The frozen holdout** — the 60 days before the first live prediction, `2026-07-16` to `2026-09-14`, evaluated once by a model trained only on data before it. The command exists (`evaluate-holdout`); as of this writing it has not been run.
-- **The live log** — the genuinely out-of-sample test, accumulating since 2026-09-14, on the dashboard.
+**ARIMA does not clear the band.** +1.3pp on a 2.6pp band, z ≈ 1.0. Its 95% interval on accuracy runs from 49.6% to 54.7% and comfortably contains the majority baseline. This is consistent with everything the order selection said: there is no linear structure worth modelling, and a model that can only see linear structure performs like the baseline it is measured against.
 
-What to expect live: the pre-analysis suggested `close_pos` alone is worth roughly 1–3 points over the base rate, and the walk-forward numbers land in that range. If the live 30-day accuracy settles around 51–53% with MCC near zero, that is the result, and it is the expected one.
+**XGBoost clears it — on this window.** +3.1pp, z ≈ 2.4, and the 95% interval on its accuracy, 51.4% to 56.5%, sits entirely above the majority baseline by 0.5pp at the low end. That is the first number in the project to clear the system's own bar, and it is worth stating plainly rather than burying. It is also worth stating what it is not: it is one 60-day window, two models tested, at a 2σ criterion. The multi-window walk-forward estimate of the same model's edge is +1.2pp, not +3.1, over nine times as many rows. The honest reading is that the GBT's edge is probably real and probably small, that this particular summer was a favourable window for it, and that the size of the edge is a question for the live log, not for a second look at this one.
+
+**Both holdout figures came in above their walk-forward figures.** For ARIMA that is noise on a small window. For XGBoost it says selection bias — the walk-forward number being the best of 30 configurations — did not bite here; on a decoy window used to check the pipeline before the real run, walk-forward and holdout agreed to within 0.2pp. A holdout that *collapsed* relative to walk-forward would have been the leakage signal, and it did not happen.
+
+**The live log** is the other arbiter, accumulating since 2026-09-14 on the dashboard. What to expect there: if the 30-day live accuracy settles in the 51–54% range with MCC in the low single digits, that is the result, and it is the expected one. If it settles at the base rate, the holdout window was the lucky one. Either outcome is reported the same way.
 
 ---
 
@@ -199,7 +202,7 @@ A one-week rolling accuracy cannot detect a 3-point degradation: its noise band 
 
 - **It runs on a laptop.** Docker Desktop stopped twice during development; `unless-stopped` recovered the containers within seconds each time, but one outage still cost two hours of live predictions permanently. The system does not back-fill by design, so the gap is visible. The largest current threat to the live record is the host, not drift. Anything always-on — a small VPS, a Pi — would do; the whole workload is under 400KB of artifacts and a ~50-second daily retrain.
 - **The live record is young.** As of this writing it is hours old. The dashboard reports `insufficient` rather than a verdict until there are at least a week of resolved calls, and `warming_up` until the reference has 30 days. It will be a month before the drift check can say anything, and that is correct.
-- **The XGBoost walk-forward number is biased upward** by selection, as described. The holdout and the live log are the arbiters.
+- **One holdout window is one draw.** XGBoost cleared the 2σ band on it, but the walk-forward estimate of its edge over nine times as many rows is a third the size. The live log decides which is closer to the truth, and it is weeks away from being able to.
 - **Volume features are unproven.** Kept on the hypothesis that they matter through interactions; feature importance says they contribute below their share. The live log may retire them.
 - **The 7-day window exists because people ask for it,** not because it can support a conclusion.
 

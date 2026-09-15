@@ -11,7 +11,8 @@
 > recorded to `drift_checks`, and the read-only API with the live dashboard.
 > **Predictions have been logging since 2026-09-14**, so downtime loses data that cannot be
 > back-generated (§10). Always-on hosting is due, not deferred.
-> Not yet done: the README/writeup; the one-time §8 holdout evaluation has not been run.
+> **The one-time §8 holdout evaluation was run on 2026-09-15** (receipt: `docs/holdout_evaluation.txt`).
+> Nothing remains on the design list; the live log is accumulating.
 ---
 
 ## 1. Project Goal
@@ -312,6 +313,17 @@ Evaluation and drift monitoring are the same measurement taken at two points. De
 - **No random splits, no shuffled k-fold, no `train_test_split`.**
 - **Embargo gap = 1 bar minimum.** The label for bar `t` depends on `close(t+1)`, so without a gap the final training sample's *label* reaches into the test period. Small at a 1-hour horizon but free to fix. Writeup phrase: *"purging and embargo between train and test folds."*
 - **Sliding-window ablation:** a fixed 6-month training window that moves, run as a variant. The comparison — does old data help or hurt? — is a regime-awareness point. Costs one config flag.
+
+### The holdout result — **RUN ONCE, 2026-09-15**
+
+Window `[2026-07-16, 2026-09-14)`, n = 1,440; training strictly before it (16,511 rows), search confined to that data; seed 0, 30 configs; registry untouched. Receipt in `docs/holdout_evaluation.txt`.
+
+| | walk-forward | holdout | majority | MCC | log loss | AUC | edge | clears 2SE (2.6pp) |
+|---|---|---|---|---|---|---|---|---|
+| ARIMA(1,0,0) | 0.5123 | 0.5215 | 0.5083 | +0.043 | 0.69281 | 0.529 | +1.3pp | no |
+| XGBoost | 0.5204 | 0.5396 | 0.5083 | +0.079 | 0.69037 | 0.545 | +3.1pp | **yes** (z ≈ 2.4) |
+
+ARIMA behaves like the baseline it is measured against, as the order selection predicted. XGBoost clears the bar on this window — the first number in the project to do so — but the walk-forward estimate of the same edge over 12,830 rows is +1.2pp, so the honest reading is *probably real, probably small, this window favourable*. Both holdout figures exceeded walk-forward; a decoy window checked beforehand showed walk-forward ≈ holdout, so this is window variance, not inflation. A holdout that collapsed relative to walk-forward would have been the leakage signal; it did not. The live log sizes the edge from here.
 
 ### Three-way discipline
 1. Walk-forward folds → hyperparameter selection.

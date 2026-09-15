@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from btcpred.api import queries
-from btcpred.config import get_settings
+from btcpred.config import Settings, get_settings
 from btcpred.db.session import get_engine, get_sessionmaker
 from btcpred.ingest.binance import interval_to_timedelta
 from btcpred.predict.service import MODEL_NAMES
@@ -47,8 +47,13 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-def get_interval() -> timedelta:
-    return interval_to_timedelta(get_settings().binance_interval)
+# Settings enter through a dependency rather than a direct get_settings() call
+# inside handlers, so tests can override them and never need a .env file.
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+def get_interval(settings: SettingsDep) -> timedelta:
+    return interval_to_timedelta(settings.binance_interval)
 
 
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -63,8 +68,8 @@ def _check_model(model: str) -> str:
 
 
 @app.get("/health")
-async def health(session: Session) -> dict[str, Any]:
-    return await queries.health(session, get_settings().binance_symbol)
+async def health(session: Session, settings: SettingsDep) -> dict[str, Any]:
+    return await queries.health(session, settings.binance_symbol)
 
 
 @app.get("/metrics/live")
@@ -104,8 +109,9 @@ async def versions(session: Session) -> list[dict[str, Any]]:
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard(request: Request, session: Session, interval: Interval) -> HTMLResponse:
-    settings = get_settings()
+async def dashboard(
+    request: Request, session: Session, interval: Interval, settings: SettingsDep
+) -> HTMLResponse:
     context = {
         "symbol": settings.binance_symbol,
         "interval": settings.binance_interval,

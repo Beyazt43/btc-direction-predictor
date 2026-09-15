@@ -6,7 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from btcpred.api import queries
-from btcpred.api.main import app, get_interval, get_session
+from btcpred.api.main import app, get_session
+from btcpred.config import Settings, get_settings
 
 HOUR = timedelta(hours=1)
 
@@ -78,7 +79,10 @@ def client(monkeypatch):
         yield FakeSession()
 
     app.dependency_overrides[get_session] = fake_session
-    app.dependency_overrides[get_interval] = lambda: HOUR
+    # No .env in CI: settings must come from here, never from disk.
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, postgres_user="u", postgres_password="p", postgres_db="d"
+    )
     yield TestClient(app)
     app.dependency_overrides.clear()
 

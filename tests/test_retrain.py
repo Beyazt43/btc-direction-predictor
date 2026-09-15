@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from btcpred.models.gbt import DEFAULT_PARAMS
 from btcpred.models.metrics import Evaluation
@@ -114,3 +115,40 @@ def test_daily_seed_differs_by_date():
     rng_a = np.random.default_rng(20260914)
     rng_b = np.random.default_rng(20260915)
     assert rng_a.integers(0, 10**9) != rng_b.integers(0, 10**9)
+
+
+@pytest.mark.asyncio
+async def test_frozen_holdout_evaluation_end_to_end():
+    """Exercises the one-shot path on synthetic data so the real run is not
+    the first time the code executes. Trains strictly before the window,
+    scores strictly inside it, touches no registry."""
+    import pandas as pd
+
+    from btcpred.config import Settings
+    from btcpred.features.labels import RETURN_COLUMN
+    from btcpred.models.pipeline import evaluate_frozen_holdout
+
+    frame = ar1_frame(n=2400, phi=0.4, seed=9)
+    frame["open_time"] = pd.date_range("2026-01-01", periods=len(frame), freq="h", tz="UTC")
+    frame[RETURN_COLUMN] = frame["ret_lag_1"].shift(-1).fillna(0.0)
+    settings = Settings(
+        _env_file=None,
+        postgres_user="u",
+        postgres_password="p",
+        postgres_db="d",
+        holdout_start=frame["open_time"].iloc[1800].date(),
+        holdout_end=frame["open_time"].iloc[2280].date(),
+    )
+
+    result = await evaluate_frozen_holdout(
+        None, "arima", settings=settings, dataset=frame, n_configs=2
+    )
+
+    start, end = result.window
+    assert result.n_holdout == 480
+    assert result.n_train < 1800, "training must stop before the window (with embargo)"
+    assert result.holdout.n == 480
+    # φ=0.4 gives ~58% here; 0.55 is still > 2 SE above 0.5 at n=480.
+    assert result.holdout.accuracy > 0.55, "planted AR(1) signal should survive"
+    assert result.walk_forward.pooled.n > 0
+    assert start < end

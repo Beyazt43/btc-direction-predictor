@@ -4,7 +4,7 @@ A small MLOps system that predicts whether the next hourly BTC/USDT candle close
 
 **This is not a trading bot, and it does not claim to beat the market.** Hourly BTC direction is close to unpredictable, and the system says so — the base rate over two years is 50.36% up, which is statistically indistinguishable from a coin flip; the classical baseline's order selection concludes the return series is white noise; and the one model that clears the evaluation bar does so by about three points on a single 60-day window, with a walk-forward estimate a third that size. The point of the project is the machinery around that honest result: the leakage guards, the evaluation discipline, the retraining and monitoring loop, and a model comparison that is argued rather than just tabulated.
 
-The design reasoning lives in [`context.md`](context.md). This README is the tour.
+The design reasoning lives in [`context.md`](context.md); moving the running system to another machine is [`docs/runbook-migrate-host.md`](docs/runbook-migrate-host.md). This README is the tour.
 
 ---
 

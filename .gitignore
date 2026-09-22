@@ -34,3 +34,4 @@ pgdata/
 !.vscode/settings.json
 EOF
 heartbeat
+migrate/

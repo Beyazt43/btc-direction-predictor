@@ -391,6 +391,13 @@ Work through these in order, same step-by-step mode:
 
 ## 10. Build-Order Note
 
+> **Observed 2026-09-21:** with the host running only during the day, the live log captures ~11 of 24 hours
+> and 01:00–06:00 UTC has never been sampled. Measured over the full history, that block is 49.9% up
+> against 50.5% for the sampled hours (inside the noise band) but ~15% less volatile (42.4 vs 49.8 bp),
+> so the bias is second-order; the binding cost is power — at 11 calls/day the SE shrinks ~1.5× more
+> slowly than under continuous operation, and an edge the size of the walk-forward estimate needs
+> ~7,000 calls to clear 2σ.
+
 > **Observed 2026-09-14:** Docker Desktop stopped twice in one session on the dev machine. `restart: unless-stopped` recovered the containers within seconds each time, but the second outage still cost the 10:00 and 11:00 live predictions permanently — the system does not back-fill, by design. The host, not drift, is currently the largest threat to the live log.
 
 Because this runs on **real-time data**, get ingestion + prediction logging live **early** — before the dashboard, before the comparison writeup. Prediction history accumulates in wall-clock time and cannot be back-generated honestly. Every day the live loop isn't running is a day of drift-monitoring data permanently lost.

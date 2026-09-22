@@ -35,3 +35,6 @@ pgdata/
 EOF
 heartbeat
 migrate/
+
+# Local backups of the live record
+backups/

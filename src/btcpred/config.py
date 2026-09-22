@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     binance_symbol: str = "BTCUSDT"
     binance_interval: str = "1h"
 
+    # Backups. backup_dir is a host path bind-mounted into the scheduler, so a
+    # backup survives the container and can be pointed at a synced folder.
+    backup_dir: Path = Path("backups")
+    backup_cron: str = "30 3 * * *"
+    backup_keep: int = 14
+
     # Scheduler
     ingest_interval_minutes: int = 2
     retrain_cron: str = "0 2 * * *"

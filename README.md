@@ -49,6 +49,7 @@ Then open **http://localhost:8000** for the dashboard, or **http://localhost:800
 | `python -m btcpred.models evaluate-holdout` | the one-time §8 holdout number — run once |
 | `python -m btcpred.monitoring check [--dry-run]` | run the drift check now |
 | `python -m btcpred.monitoring history` | recent recorded checks |
+| `python -m btcpred.backup create\|list\|verify\|restore` | back up the record, or put it back |
 
 The API is read-only. Every state change goes through the CLI or the scheduler, so a bug or a bad actor on the web surface cannot retrain or roll back anything.
 
@@ -75,7 +76,8 @@ Four containers, one image:
 ```
 db         Postgres 16. Volumes: pgdata (bars, predictions, registry), models (artifacts).
 migrate    One-shot: alembic upgrade head. api and scheduler wait for it to succeed.
-scheduler  APScheduler in its own process: the 2-minute tick, the 02:00 retrain, the 03:00 drift check.
+scheduler  APScheduler in its own process: the 2-minute tick, the 02:00 retrain, the 03:00 drift
+           check, the 03:30 backup.
 api        FastAPI, read-only. Serves the JSON endpoints and the dashboard.
 ```
 
@@ -198,8 +200,29 @@ A one-week rolling accuracy cannot detect a 3-point degradation: its noise band 
 
 ---
 
+## Backups
+
+`predictions` cannot be rebuilt, so a nightly job writes every table to a host directory as gzipped
+CSV with a manifest: the Alembic revision, per-table row counts, and a SHA-256 per file. Fourteen are
+kept. Point `BACKUP_DIR` at a synced folder and the record leaves the machine.
+
+It backs up **data, not schema**. The schema lives in Alembic, in git, so a restore is
+`alembic upgrade head` followed by a load — which means a backup cannot drift out of step with the
+migrations the way a captured DDL snapshot can, and the application image needs no `pg_dump` binary
+matched to the server version.
+
+The new backup is verified before any old one is pruned, so a corrupt write cannot take the last good
+copy with it, and each is assembled in a `.partial` directory that is renamed only on success.
+
+The restore path is tested rather than assumed: the round trip was exercised against a real database
+by deleting the live tables and putting them back, comparing an MD5 of every prediction row before
+and after. That test caught two real defects — CSV returns strings and the driver will not coerce
+`"1"` into a `BIGINT`, and the identity sequences need resetting or the next insert collides with a
+restored id weeks later.
+
 ## Honest limitations
 
+- **The record lives on one machine.** Backups are nightly and verified, but they sit on the same host unless `BACKUP_DIR` points somewhere synced. That is a deliberate stopping point, not an oversight.
 - **It runs on a laptop.** Docker Desktop stopped twice during development; `unless-stopped` recovered the containers within seconds each time, but one outage still cost two hours of live predictions permanently. The system does not back-fill by design, so the gap is visible. The largest current threat to the live record is the host, not drift. Anything always-on — a small VPS, a Pi — would do; the whole workload is under 400KB of artifacts and a ~50-second daily retrain.
 - **The live record is young, and the dashboard says so.** It reports `insufficient` rather than a verdict until a week of resolved calls exists, and `warming_up` until the reference has 30 days.
 - **The live sample is censored by host uptime, not at random.** The machine runs during the day, so roughly 11 of 24 hours are captured, and 01:00–06:00 UTC has never been sampled at all. Those hours are not wildly different — over the full two years they run 49.9% up against 50.5% for the sampled block, a gap inside the noise band — but they are about 15% less volatile (42.4 bp vs 49.8 bp), so the live estimate is mildly biased toward volatile hours. The effect is second-order; the first-order cost is statistical power, since at 11 calls a day the error bar shrinks √(24/11) ≈ 1.5× more slowly than it would under continuous operation. Detecting an edge the size of the walk-forward estimate (1.2pp) needs roughly 1/edge² ≈ 7,000 calls either way — months of continuous running, years of part-time. Missing hours are left empty rather than imputed, so the censoring is visible in the record instead of hidden in an average.

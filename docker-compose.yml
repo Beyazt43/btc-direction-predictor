@@ -59,6 +59,9 @@ services:
     command: python -m btcpred.scheduler
     volumes:
       - models:/app/models
+      # A host bind mount, not a named volume: backups must survive the stack
+      # and be reachable for copying somewhere else.
+      - ${BACKUP_DIR:-./backups}:/app/backups
     # Docker only sees a process exit. A hung event loop looks alive forever,
     # so the tick touches a heartbeat file and this check fails if it goes
     # stale for three intervals.

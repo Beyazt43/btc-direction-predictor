@@ -11,8 +11,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from btcpred.backup.service import BackupInfo, create_backup, prune, verify_backup
 from btcpred.config import get_settings
-from btcpred.db.session import session_scope
+from btcpred.db.session import get_engine, session_scope
 from btcpred.ingest.binance import interval_to_timedelta
 from btcpred.ingest.service import SyncResult, run_sync
 from btcpred.monitoring.drift import DriftCheck, check_model, record_check
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 TICK_JOB_ID = "lifecycle_tick"
 RETRAIN_JOB_ID = "daily_retrain"
 DRIFT_JOB_ID = "daily_drift_check"
+BACKUP_JOB_ID = "daily_backup"
 # Kept for callers that reference the ingest job by its original id.
 INGEST_JOB_ID = TICK_JOB_ID
 
@@ -181,3 +183,29 @@ async def drift_job() -> list[DriftCheck]:
         except Exception:
             logger.exception("drift check failed for %s; will retry tomorrow", name)
     return checks
+
+
+async def backup_job() -> BackupInfo | None:
+    """Write a verified backup of the irreplaceable tables, then prune old ones.
+
+    The prediction record cannot be rebuilt, and after a host migration it lives
+    on exactly one machine. This runs in-process rather than as a subprocess: it
+    is a few seconds of I/O over a small dataset, not a CPU-bound fit.
+
+    The new backup is verified before anything is pruned, so a corrupt write can
+    never take the last good copy with it.
+    """
+    settings = get_settings()
+    root = Path(settings.backup_dir)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        async with get_engine().begin() as conn:
+            info = await create_backup(conn, root)
+        verify_backup(info.path)
+        prune(root, settings.backup_keep)
+    except Exception:
+        logger.exception("backup failed; previous backups are untouched")
+        return None
+
+    logger.info("backup %s: %d rows, %.0f KB", info.name, info.total_rows, info.size_bytes / 1024)
+    return info

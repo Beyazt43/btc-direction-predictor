@@ -104,21 +104,27 @@ async def test_cold_start_does_not_replay_a_missed_cron_on_its_own():
 
 
 @pytest.mark.asyncio
-async def test_stale_daily_jobs_are_pulled_forward_on_boot(monkeypatch):
+async def test_stale_daily_jobs_are_pulled_forward_on_boot(monkeypatch, tmp_path):
     from datetime import UTC, datetime, timedelta
 
     from btcpred.scheduler import runner
-    from btcpred.scheduler.runner import DRIFT_JOB_ID, RETRAIN_JOB_ID, schedule_catch_up
+    from btcpred.scheduler.runner import (
+        BACKUP_JOB_ID,
+        DRIFT_JOB_ID,
+        RETRAIN_JOB_ID,
+        schedule_catch_up,
+    )
 
     now = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
-    # Last retrain 26h ago, last drift check never.
+    # Last retrain 26h ago, last drift check never, no backups on disk.
     monkeypatch.setattr(runner, "session_scope", _scope_with([now - timedelta(hours=26), None]))
 
-    scheduler = build_scheduler(make_settings())
+    settings = make_settings(backup_dir=tmp_path)
+    scheduler = build_scheduler(settings)
     scheduler.start(paused=True)
     try:
-        pulled = await schedule_catch_up(scheduler, now=now)
-        assert pulled == [RETRAIN_JOB_ID, DRIFT_JOB_ID]
+        pulled = await schedule_catch_up(scheduler, now=now, settings=settings)
+        assert pulled == [RETRAIN_JOB_ID, DRIFT_JOB_ID, BACKUP_JOB_ID]
         assert scheduler.get_job(RETRAIN_JOB_ID).next_run_time == now + runner.CATCH_UP_DELAY
         assert scheduler.get_job(DRIFT_JOB_ID).next_run_time == now + runner.CATCH_UP_DELAY * 3
     finally:
@@ -126,9 +132,10 @@ async def test_stale_daily_jobs_are_pulled_forward_on_boot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fresh_daily_jobs_are_left_on_their_cron(monkeypatch):
+async def test_fresh_daily_jobs_are_left_on_their_cron(monkeypatch, tmp_path):
     from datetime import UTC, datetime, timedelta
 
+    from btcpred.backup.service import MANIFEST, Manifest
     from btcpred.scheduler import runner
     from btcpred.scheduler.runner import DRIFT_JOB_ID, RETRAIN_JOB_ID, schedule_catch_up
 
@@ -136,15 +143,26 @@ async def test_fresh_daily_jobs_are_left_on_their_cron(monkeypatch):
     monkeypatch.setattr(
         runner, "session_scope", _scope_with([now - timedelta(hours=3), now - timedelta(hours=2)])
     )
+    recent = tmp_path / "btcpred-20260915T060000Z"
+    recent.mkdir()
+    (recent / MANIFEST).write_text(
+        Manifest(
+            created_at=(now - timedelta(hours=3)).isoformat(),
+            alembic_revision="x",
+            rows={},
+            sha256={},
+        ).to_json()
+    )
 
-    scheduler = build_scheduler(make_settings())
+    settings = make_settings(backup_dir=tmp_path)
+    scheduler = build_scheduler(settings)
     scheduler.start(paused=True)
     try:
         before = {
             RETRAIN_JOB_ID: scheduler.get_job(RETRAIN_JOB_ID).next_run_time,
             DRIFT_JOB_ID: scheduler.get_job(DRIFT_JOB_ID).next_run_time,
         }
-        assert await schedule_catch_up(scheduler, now=now) == []
+        assert await schedule_catch_up(scheduler, now=now, settings=settings) == []
         for job_id, t in before.items():
             assert scheduler.get_job(job_id).next_run_time == t
     finally:
@@ -160,3 +178,59 @@ def test_stale_threshold_keeps_a_daily_cadence_on_a_daytime_machine():
 
     assert timedelta(hours=23, minutes=30) > STALE_AFTER
     assert timedelta(hours=12) < STALE_AFTER
+
+
+@pytest.mark.asyncio
+async def test_stale_backup_is_pulled_forward_on_boot(monkeypatch, tmp_path):
+    """A machine never on at 03:30 UTC would otherwise never back up at all."""
+    from datetime import UTC, datetime, timedelta
+
+    from btcpred.scheduler import runner
+    from btcpred.scheduler.runner import BACKUP_JOB_ID, schedule_catch_up
+
+    now = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
+    settings = make_settings(backup_dir=tmp_path)
+    # Retrain and drift are fresh; only the backup should move.
+    monkeypatch.setattr(
+        runner, "session_scope", _scope_with([now - timedelta(hours=2), now - timedelta(hours=1)])
+    )
+
+    scheduler = build_scheduler(settings)
+    scheduler.start(paused=True)
+    try:
+        pulled = await schedule_catch_up(scheduler, now=now, settings=settings)
+        assert pulled == [BACKUP_JOB_ID], "no backups on disk means the backup is due"
+        assert scheduler.get_job(BACKUP_JOB_ID).next_run_time == now + runner.CATCH_UP_DELAY * 4
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_recent_backup_is_left_alone(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from btcpred.backup.service import MANIFEST, Manifest
+    from btcpred.scheduler import runner
+    from btcpred.scheduler.runner import BACKUP_JOB_ID, schedule_catch_up
+
+    now = datetime(2026, 9, 23, 9, 0, tzinfo=UTC)
+    recent = now - timedelta(hours=3)
+    path = tmp_path / "btcpred-20260923T060000Z"
+    path.mkdir()
+    (path / MANIFEST).write_text(
+        Manifest(created_at=recent.isoformat(), alembic_revision="x", rows={}, sha256={}).to_json()
+    )
+
+    settings = make_settings(backup_dir=tmp_path)
+    monkeypatch.setattr(
+        runner, "session_scope", _scope_with([now - timedelta(hours=2), now - timedelta(hours=1)])
+    )
+
+    scheduler = build_scheduler(settings)
+    scheduler.start(paused=True)
+    try:
+        before = scheduler.get_job(BACKUP_JOB_ID).next_run_time
+        assert await schedule_catch_up(scheduler, now=now, settings=settings) == []
+        assert scheduler.get_job(BACKUP_JOB_ID).next_run_time == before
+    finally:
+        scheduler.shutdown(wait=False)

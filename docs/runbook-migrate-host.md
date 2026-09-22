@@ -21,6 +21,22 @@ Model artifacts are the trap. They live in a Docker named volume, so a fresh hos
 while the restored registry still points at their paths. Predictions then fail quietly — caught and
 logged by `predict_job`, with no rows written. Step 9 fixes this and must not be skipped.
 
+## A note on backups
+
+Since the nightly backup job exists, `BACKUP_DIR` on the old host already holds verified snapshots of
+exactly the tables this runbook protects. Restoring one on the new host is an alternative to the
+`pg_dump` route below:
+
+```bash
+docker compose up -d db
+docker compose run --rm scheduler alembic upgrade head
+docker compose run --rm scheduler python -m btcpred.backup restore <name> --yes-destroy-current-data
+```
+
+The dump route is still the default here because it captures the database as of the moment you cut
+over, whereas the newest backup may be up to a day old — and during a migration, a day is the whole
+point.
+
 ## Preconditions on the new host
 
 - Docker Desktop (or Docker Engine) and Git installed.

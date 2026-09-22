@@ -9,19 +9,23 @@ import asyncio
 import logging
 import signal
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import sqlalchemy as sa
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from btcpred.backup.service import list_backups
 from btcpred.config import Settings, get_settings
 from btcpred.db.session import get_engine, session_scope
 from btcpred.db.tables import drift_checks, model_versions
 from btcpred.scheduler.jobs import (
+    BACKUP_JOB_ID,
     DRIFT_JOB_ID,
     RETRAIN_JOB_ID,
     TICK_JOB_ID,
+    backup_job,
     drift_job,
     retrain_job,
     tick_job,
@@ -75,6 +79,16 @@ def build_scheduler(settings: Settings | None = None) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=12 * 60 * 60,
     )
+
+    scheduler.add_job(
+        backup_job,
+        CronTrigger.from_crontab(settings.backup_cron, timezone=UTC),
+        id=BACKUP_JOB_ID,
+        name="daily backup",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=12 * 60 * 60,
+    )
     return scheduler
 
 
@@ -87,7 +101,11 @@ STALE_AFTER = timedelta(hours=20)
 CATCH_UP_DELAY = timedelta(minutes=2)
 
 
-async def schedule_catch_up(scheduler: AsyncIOScheduler, now: datetime | None = None) -> list[str]:
+async def schedule_catch_up(
+    scheduler: AsyncIOScheduler,
+    now: datetime | None = None,
+    settings: Settings | None = None,
+) -> list[str]:
     """Pull forward any daily job whose last output is stale.
 
     The same self-healing principle as ingestion, applied to the daily jobs:
@@ -96,6 +114,7 @@ async def schedule_catch_up(scheduler: AsyncIOScheduler, now: datetime | None = 
     Returns the ids of the jobs that were pulled forward.
     """
     now = now or datetime.now(UTC)
+    settings = settings or get_settings()
     pulled: list[str] = []
 
     async with session_scope() as session:
@@ -114,7 +133,28 @@ async def schedule_catch_up(scheduler: AsyncIOScheduler, now: datetime | None = 
         scheduler.modify_job(DRIFT_JOB_ID, next_run_time=now + CATCH_UP_DELAY * 3)
         pulled.append(DRIFT_JOB_ID)
         logger.info("drift check is stale (last %s); running in %s", last_check, CATCH_UP_DELAY * 3)
+
+    # The backup's freshness lives on the filesystem rather than in a table, but
+    # the reasoning is the same: a machine that is never on at 03:30 UTC would
+    # otherwise never back up at all.
+    if stale(_last_backup_at(settings)):
+        scheduler.modify_job(BACKUP_JOB_ID, next_run_time=now + CATCH_UP_DELAY * 4)
+        pulled.append(BACKUP_JOB_ID)
+        logger.info("backup is stale; running in %s", CATCH_UP_DELAY * 4)
     return pulled
+
+
+def _last_backup_at(settings: Settings) -> datetime | None:
+    try:
+        backups = list_backups(Path(settings.backup_dir))
+    except OSError:
+        return None
+    if not backups:
+        return None
+    try:
+        return datetime.fromisoformat(backups[0].manifest.created_at)
+    except ValueError:
+        return None
 
 
 def _install_signal_handlers(stop: asyncio.Event) -> None:
@@ -136,15 +176,16 @@ async def run_forever(settings: Settings | None = None) -> None:
 
     scheduler.start()
     logger.info(
-        "scheduler started: symbol=%s interval=%s poll=%dmin retrain='%s' drift='%s'",
+        "scheduler started: symbol=%s interval=%s poll=%dmin retrain='%s' drift='%s' backup='%s'",
         settings.binance_symbol,
         settings.binance_interval,
         settings.ingest_interval_minutes,
         settings.retrain_cron,
         settings.drift_cron,
+        settings.backup_cron,
     )
     try:
-        await schedule_catch_up(scheduler)
+        await schedule_catch_up(scheduler, settings=settings)
     except Exception:
         # The cron schedule still stands; only the boot-time catch-up is lost.
         logger.exception("could not check for stale daily jobs")

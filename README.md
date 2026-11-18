@@ -166,6 +166,25 @@ Read it in this order.
 
 **The live log** is the other arbiter, accumulating since 2026-09-14 on the dashboard. What to expect there: if the 30-day live accuracy settles in the 51–54% range with MCC in the low single digits, that is the result, and it is the expected one. If it settles at the base rate, the holdout window was the lucky one. Either outcome is reported the same way.
 
+### Live result — first armed drift check, 2026-11-18
+
+The paragraph above was written before the live log existed. This is what the log said once the drift detector had enough history to arm: 1,463 live hours from `2026-09-14` to `2026-11-18`, each scored on the earliest call made before its bar closed. The record has one gap since continuous operation began, five hours on 2026-09-22/23.
+
+| | n | majority | accuracy | edge | MCC | log loss | AUC | clears ±2 SE (2.6pp)? |
+|---|---|---|---|---|---|---|---|---|
+| ARIMA, holdout | 1,440 | 0.5083 | 0.5215 | +1.3pp | +0.043 | 0.69281 | 0.529 | no |
+| ARIMA, **live** | 1,463 | 0.5147 | **0.5161** | +0.1pp | +0.042 | **0.69287** | 0.534 | no |
+| XGBoost, holdout | 1,440 | 0.5083 | 0.5396 | +3.1pp | +0.079 | 0.69037 | 0.545 | yes |
+| XGBoost, **live** | 1,463 | 0.5147 | **0.5099** | −0.5pp | +0.023 | **0.69077** | 0.539 | **no** |
+
+**Log loss replicated in size, not in significance.** Both live log losses sit within 0.0004 of their holdout values. XGBoost beats `ln 2` by 0.0024, positive in both halves of the log, but a paired per-call test puts that at z = 1.60; ARIMA's 0.0003 is z = 0.99, and a constant forecast at the realised base rate (0.69270, known only in hindsight) would have beaten it. XGBoost's lead over ARIMA is z = 1.54. Nothing here clears 2σ.
+
+**The accuracy edge did not replicate.** The market fell over the window — 48.5% of hours closed up, 46.7% in the last 30 days — so the majority baseline is *always down*, while both models lean up (ARIMA calls up on 64% of hours, XGBoost on 55%). XGBoost's live edge is −0.5pp with a 95% interval of −3.1 to +2.1pp: the holdout's +3.1pp lies outside it (z ≈ −2.7), while the walk-forward +1.2pp (z ≈ −1.3) and zero both lie inside. The two models are indistinguishable on paired hours — 439 disagreements, 224 won by ARIMA and 215 by XGBoost, McNemar p = 0.70.
+
+**Drift armed on 2026-11-18** with a 734-call reference and read `ok` for both: ARIMA z = +1.01, XGBoost z = −0.15. That says neither model has degraded against its own history, which was itself at the base rate. It is not evidence of skill.
+
+**Against the expectation above:** ARIMA landed inside the 51–54% band and XGBoost just below it, with MCC in the low single digits. But the band was written against a 50.8% majority; at the realised 51.5–53.3%, accuracy in that range no longer means an edge. Measured against the baseline, both models settled at the base rate — the second outcome. The holdout window was the lucky one for XGBoost's accuracy edge. What did carry over is the small amount of information in its probabilities, which is real in size on both windows and not yet distinguishable from zero live. Telling a 1.2pp edge from none needs roughly 7,000 calls, about eight more months of continuous running.
+
 ---
 
 ## Evaluation discipline
@@ -225,8 +244,8 @@ restored id weeks later.
 - **The record lives on one machine.** Backups are nightly and verified, but they sit on the same host unless `BACKUP_DIR` points somewhere synced. That is a deliberate stopping point, not an oversight.
 - **It runs on a laptop.** Docker Desktop stopped twice during development; `unless-stopped` recovered the containers within seconds each time, but one outage still cost two hours of live predictions permanently. The system does not back-fill by design, so the gap is visible. The largest current threat to the live record is the host, not drift. Anything always-on — a small VPS, a Pi — would do; the whole workload is under 400KB of artifacts and a ~50-second daily retrain.
 - **The live record is young, and the dashboard says so.** It reports `insufficient` rather than a verdict until the 30-day window holds 168 resolved calls, and `warming_up` until the reference — every live call older than the 30-day window — holds 720 calls.
-- **The live sample is censored by host uptime, not at random.** The machine runs during the day, so roughly 11 of 24 hours are captured, and 01:00–06:00 UTC has never been sampled at all. Those hours are not wildly different — over the full two years they run 49.9% up against 50.5% for the sampled block, a gap inside the noise band — but they are about 15% less volatile (42.4 bp vs 49.8 bp), so the live estimate is mildly biased toward volatile hours. The effect is second-order; the first-order cost is statistical power, since at 11 calls a day the error bar shrinks √(24/11) ≈ 1.5× more slowly than it would under continuous operation. Detecting an edge the size of the walk-forward estimate (1.2pp) needs roughly 1/edge² ≈ 7,000 calls either way — months of continuous running, years of part-time. Missing hours are left empty rather than imputed, so the censoring is visible in the record instead of hidden in an average.
-- **One holdout window is one draw.** XGBoost cleared the 2σ band on it, but the walk-forward estimate of its edge over nine times as many rows is a third the size. The live log decides which is closer to the truth, and it is weeks away from being able to.
+- **The live sample's first week was censored by host uptime, not at random.** Until the host migration on 2026-09-22 the machine ran only during the day, so roughly 11 of 24 hours were captured and 01:00–06:00 UTC was never sampled; the log has run around the clock since, and only 102 of the first 1,463 calls come from the daytime-only period. Those hours are not wildly different — over the full two years they run 49.9% up against 50.5% for the sampled block, a gap inside the noise band — but they are about 15% less volatile (42.4 bp vs 49.8 bp), so that week mildly over-weights volatile hours, a bias now diluted to 7% of the sample. Its larger cost was statistical power: at 11 calls a day the error bar shrank √(24/11) ≈ 1.5× more slowly than it does under continuous operation. Detecting an edge the size of the walk-forward estimate (1.2pp) needs roughly 1/edge² ≈ 7,000 calls either way — months of continuous running, years of part-time. Missing hours are left empty rather than imputed, so the censoring is visible in the record instead of hidden in an average.
+- **One holdout window is one draw.** XGBoost cleared the 2σ band on it, but the walk-forward estimate of its edge over nine times as many rows is a third the size. The live log has since rejected the holdout's +3.1pp (see *Live result* above); it cannot yet tell the walk-forward +1.2pp from zero.
 - **Volume features are unproven.** Kept on the hypothesis that they matter through interactions; feature importance says they contribute below their share. The live log may retire them.
 - **The 7-day window exists because people ask for it,** not because it can support a conclusion.
 

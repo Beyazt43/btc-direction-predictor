@@ -1,0 +1,36 @@
+Live evaluation receipt — btc-direction-predictor
+source: backup btcpred-20261118T142438Z, alembic d6eb0a62352a
+  drift_checks.csv.gz    sha256 ok  rows 134
+  model_versions.csv.gz  sha256 ok  rows 136
+  predictions.csv.gz     sha256 ok  rows 3044
+prediction rows 3044; unresolved at stop 2 (excluded)
+
+== Snapshot reproduced by the README 'Live result' section ==
+paired live hours   1463   (2026-09-14 07:00 .. 2026-11-18 12:00 UTC)
+hours closed up     0.4853   (majority class: down)
+
+model    accuracy majority     edge   ±2SE     MCC  log loss    AUC up-calls
+arima      0.5161   0.5147   +0.14pp   2.6pp +0.0420   0.69287 0.5340   0.6398
+xgboost    0.5099   0.5147   -0.48pp   2.6pp +0.0229   0.69077 0.5390   0.5502
+
+log-loss gain over ln 2, arima    +0.00028   z = +0.99   (paired per call, one-sided)
+log-loss gain over ln 2, xgboost  +0.00238   z = +1.60   (paired per call, one-sided)
+xgboost log loss below arima      +0.00210   z = +1.54
+McNemar: arima-only correct 224, xgboost-only correct 215, p = 0.703
+
+== Final: the whole frozen live log ==
+paired live hours   1464   (2026-09-14 07:00 .. 2026-11-18 13:00 UTC)
+hours closed up     0.4850   (majority class: down)
+
+model    accuracy majority     edge   ±2SE     MCC  log loss    AUC up-calls
+arima      0.5157   0.5150   +0.07pp   2.6pp +0.0415   0.69287 0.5337   0.6400
+xgboost    0.5096   0.5150   -0.55pp   2.6pp +0.0223   0.69083 0.5385   0.5505
+
+log-loss gain over ln 2, arima    +0.00028   z = +0.98   (paired per call, one-sided)
+log-loss gain over ln 2, xgboost  +0.00232   z = +1.55   (paired per call, one-sided)
+xgboost log loss below arima      +0.00204   z = +1.50
+McNemar: arima-only correct 224, xgboost-only correct 215, p = 0.703
+
+== Last drift check per model ==
+arima    2026-11-18T03:00  ok         observed 0.5292 (n=718)  reference 0.5027 (n=734)  z = +1.01
+xgboost  2026-11-18T03:00  ok         observed 0.5084 (n=718)  reference 0.5123 (n=734)  z = -0.15

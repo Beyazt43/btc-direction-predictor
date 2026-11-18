@@ -2,7 +2,9 @@
 
 A small MLOps system that predicts whether the next hourly BTC/USDT candle closes up or down, and then keeps itself honest about it: it ingests live data, predicts every hour, scores every prediction against what actually happened, retrains daily behind an activation gate, and monitors its own live record for drift.
 
-**This is not a trading bot, and it does not claim to beat the market.** Hourly BTC direction is close to unpredictable, and the system says so — the base rate over two years is 50.36% up, which is statistically indistinguishable from a coin flip; the classical baseline's order selection concludes the return series is white noise; and the one model that clears the evaluation bar does so by about three points on a single 60-day window, with a walk-forward estimate a third that size. The point of the project is the machinery around that honest result: the leakage guards, the evaluation discipline, the retraining and monitoring loop, and a model comparison that is argued rather than just tabulated.
+**This is not a trading bot, and it does not claim to beat the market.** Hourly BTC direction is close to unpredictable, and the system says so — the base rate over two years is 50.36% up, which is statistically indistinguishable from a coin flip; the classical baseline's order selection concludes the return series is white noise; and the one model that clears the evaluation bar does so by about three points on a single 60-day window, with a walk-forward estimate a third that size — and on 1,464 hours of live calls it did not clear it at all. The point of the project is the machinery around that honest result: the leakage guards, the evaluation discipline, the retraining and monitoring loop, and a model comparison that is argued rather than just tabulated.
+
+> **Status: stopped on 2026-11-18.** The live log ran from 2026-09-14 to 2026-11-18, 1,464 live hours, and XGBoost's holdout edge did not hold up on it — see [Live result](#live-result--first-armed-drift-check-2026-11-18). The frozen log is committed in [`docs/live_log/`](docs/live_log/), and [`docs/live_evaluation.txt`](docs/live_evaluation.txt) recomputes every live number from it.
 
 The design reasoning lives in [`context.md`](context.md); moving the running system to another machine is [`docs/runbook-migrate-host.md`](docs/runbook-migrate-host.md). This README is the tour.
 
@@ -192,6 +194,8 @@ The paragraph above was written before the live log existed. This is what the lo
 
 ARIMA is reported alongside both and tested in neither; at its observed gains, neither look has meaningful power for it.
 
+**The log stopped on 2026-11-18 at 14:00 UTC, and these looks will not be run.** The result above is final. The frozen log — every prediction, drift check and registered model version — is committed in [`docs/live_log/`](docs/live_log/) with SHA-256s matching the verified backup it came from, and [`docs/live_evaluation.txt`](docs/live_evaluation.txt) recomputes this section from it with the project's own scoring code ([`scripts/live_evaluation.py`](scripts/live_evaluation.py)); the snapshot it reproduces matches the table above to the last digit. The one further hour resolved before the stop changes nothing: 1,464 hours, XGBoost edge −0.55pp, log-loss gain z = 1.55.
+
 ---
 
 ## Evaluation discipline
@@ -252,8 +256,8 @@ restored id weeks later.
 - **It runs on a laptop.** Docker Desktop stopped twice during development; `unless-stopped` recovered the containers within seconds each time, but one outage still cost two hours of live predictions permanently. The system does not back-fill by design, so the gap is visible. The largest current threat to the live record is the host, not drift. On Windows, [`scripts/watchdog.ps1`](scripts/watchdog.ps1) runs every five minutes from Task Scheduler and restarts Docker Desktop and the stack if either has died — a Microsoft Store update to WSL tears down Docker's VM with no reboot at all, which cost five hours on 2026-09-22/23 — and checks the health endpoint from the host, because the in-container healthchecks keep passing while the host port proxy is broken. It cannot help after a reboot until someone logs in, since Docker Desktop needs a desktop session. Anything always-on — a small VPS, a Pi — would do; the whole workload is under 400KB of artifacts and a ~50-second daily retrain.
 - **The live record is young, and the dashboard says so.** It reports `insufficient` rather than a verdict until the 30-day window holds 168 resolved calls, and `warming_up` until the reference — every live call older than the 30-day window — holds 720 calls.
 - **The live sample's first week was censored by host uptime, not at random.** Until the host migration on 2026-09-22 the machine ran only during the day, so roughly 11 of 24 hours were captured and 01:00–06:00 UTC was never sampled; the log has run around the clock since, and only 102 of the first 1,463 calls come from the daytime-only period. Those hours are not wildly different — over the full two years they run 49.9% up against 50.5% for the sampled block, a gap inside the noise band — but they are about 15% less volatile (42.4 bp vs 49.8 bp), so that week mildly over-weights volatile hours, a bias now diluted to 7% of the sample. Its larger cost was statistical power: at 11 calls a day the error bar shrank √(24/11) ≈ 1.5× more slowly than it does under continuous operation. An edge the size of the walk-forward estimate (1.2pp) only reaches 2σ on average at roughly 1/edge² ≈ 7,000 calls — a coin flip — and needs about 14,000 for 80% power: well over a year of continuous running, several of part-time. Missing hours are left empty rather than imputed, so the censoring is visible in the record instead of hidden in an average.
-- **One holdout window is one draw.** XGBoost cleared the 2σ band on it, but the walk-forward estimate of its edge over nine times as many rows is a third the size. The live log has since rejected the holdout's +3.1pp (see *Live result* above); it cannot yet tell the walk-forward +1.2pp from zero.
-- **Volume features are unproven.** Kept on the hypothesis that they matter through interactions; feature importance says they contribute below their share. The live log may retire them.
+- **One holdout window is one draw.** XGBoost cleared the 2σ band on it, but the walk-forward estimate of its edge over nine times as many rows is a third the size. The live log has since rejected the holdout's +3.1pp (see *Live result* above); it stopped before it could tell the walk-forward +1.2pp from zero.
+- **Volume features are unproven.** Kept on the hypothesis that they matter through interactions; feature importance says they contribute below their share. The live log stopped before it could settle them.
 - **The 7-day window exists because people ask for it,** not because it can support a conclusion.
 
 ---
@@ -271,7 +275,10 @@ src/btcpred/
   monitoring/          drift check
   scheduler/           the tick, the retrain, the drift job; heartbeat
   api/                 read-only FastAPI and the dashboard
+  backup/              verified nightly backups of the record, and restore
 migrations/            four Alembic revisions, hand-written, async env
+scripts/               watchdog.ps1 (Windows host recovery); live_evaluation.py (regenerates the live receipt)
+docs/                  holdout and live receipts, the frozen live log, the host-migration runbook
 tests/                 118 tests, none of which need a database or the network
 context.md             the design document: every decision and the reasoning behind it
 ```

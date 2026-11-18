@@ -38,3 +38,9 @@ migrate/
 
 # Local backups of the live record
 backups/
+
+# Database dumps (the host-migration runbook copies one into the repo root)
+*.sql
+
+# Watchdog maintenance switch (scripts/watchdog.ps1)
+.watchdog-disabled
